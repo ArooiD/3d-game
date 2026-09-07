@@ -6,11 +6,13 @@ import { registerIpcHandlers } from './ipc/handlers';
  * Electron entry point.
  *
  * Dev mode  -> loads the Vite dev server (VITE_DEV_SERVER_URL or http://localhost:5173)
- * Prod mode -> loads dist-renderer/index.html built by esbuild
+ * Prod mode -> loads dist/renderer/index.html built by esbuild (a sibling of
+ *              dist/electron, so the path resolves relative to this bundle)
  */
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173';
-const isDev = !app.isPackaged && !!process.env.VITE_DEV_SERVER_URL;
+const useDevServer = !!process.env.VITE_DEV_SERVER_URL;
+const isDev = !app.isPackaged;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -46,11 +48,11 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
-  if (isDev) {
+  if (useDevServer) {
     void win.loadURL(devServerUrl);
-    win.webContents.openDevTools({ mode: 'detach' });
+    if (isDev) win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    void win.loadFile(path.join(__dirname, '..', 'dist', 'renderer', 'index.html'));
+    void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   }
 
   return win;

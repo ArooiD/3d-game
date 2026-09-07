@@ -47,6 +47,8 @@ export class Enemy implements TargetRegistry {
   readonly position = new THREE.Vector3();
   /** Feet position, synced to the group each frame. */
   state: EnemyState = 'idle';
+  /** True for enemies summoned by the mini-boss during phase 2. */
+  bossMinion = false;
   health: number;
   maxHealth: number;
   shield: number;
@@ -263,7 +265,8 @@ export class Enemy implements TargetRegistry {
         byPlayer,
         isBoss: this.isBoss,
         isElite: Boolean(this.definition.isElite),
-        xpReward: this.definition.xpReward,
+        xpReward: this.bossMinion ? Math.round(this.definition.xpReward * 0.4) : this.definition.xpReward,
+        bossMinion: this.bossMinion,
         lootChance: this.definition.lootChance,
         name: this.definition.name,
       });

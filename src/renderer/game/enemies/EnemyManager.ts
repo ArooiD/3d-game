@@ -81,6 +81,28 @@ export class EnemyManager {
     return count;
   }
 
+  findById(id: string): Enemy | null {
+    for (const enemy of this.enemies) {
+      if (enemy.id === id) return enemy;
+    }
+    return null;
+  }
+
+  /** Nearest living enemy to a point, used by the combat drone. */
+  nearestAlive(point: THREE.Vector3, maxDistance = 40): Enemy | null {
+    let best: Enemy | null = null;
+    let bestDistance = maxDistance;
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      const distance = enemy.distanceTo(point);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = enemy;
+      }
+    }
+    return best;
+  }
+
   get boss(): Enemy | null {
     for (const enemy of this.enemies) {
       if (enemy.isBoss && enemy.alive) return enemy;
@@ -97,6 +119,7 @@ export class EnemyManager {
     const enemy = new Enemy(definition, scale, built.rig, built.dispose);
     const y = request.y ?? this.groundY(request.x, request.z);
     enemy.place(request.x, y, request.z);
+    enemy.bossMinion = Boolean(request.bossMinion);
 
     // Per-archetype loadout flourishes.
     if (definition.isElite) {
