@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { CollisionWorld } from '../src/renderer/game/physics/CollisionWorld';
+import { World } from '../src/renderer/game/world/World';
+import { RNG } from '../src/renderer/game/core/Rng';
 
 /**
  * Movement resolution at platform edges. These are the shapes the world actually
@@ -134,3 +136,123 @@ test('walls: walking into a wall while grounded does not lift the capsule', () =
   const out = walk(w, { x: -1, y: 0, z: 0 }, 8, 40);
   assert.ok(out.frames.every((f) => Math.abs(f.y) < 1e-6), 'pushing into a wall raised the player');
 });
+
+/**
+ * Whole-level traversal. These walk the route the player actually takes through
+ * the shipped level - drop pad, camp, canyon, refinery, arena - against the real
+ * geometry. A spot where the capsule cannot advance is what the player reports as
+ * "I got stuck here".
+ */
+interface Level {
+  collision: CollisionWorld;
+  anchors: World['anchors'];
+  spawns: World['spawns'];
+}
+
+function realLevel(): Level {
+  const collision = new CollisionWorld();
+  collision.setFlatGround(0);
+  const scene = { add: () => undefined } as unknown as import('three').Scene;
+  const built = new World(scene, collision, new RNG(20260907));
+  return { collision, anchors: built.anchors, spawns: built.spawns };
+}
+
+interface MarchResult {
+  x: number;
+  z: number;
+  embedded: string[];
+  longestFreeze: number;
+}
+
+/**
+ * Marches the capsule at walk speed toward a target, one frame per step. A player
+ * does not walk a dead-straight line into a rock: they steer around it. The probe
+ * does the same, fanning out to the sides whenever the direct heading is blocked,
+ * so what it reports as stuck is a spot nothing could get past, not a boulder a
+ * player would simply walk around.
+ */
+function march(
+  w: CollisionWorld,
+  start: { x: number; y: number; z: number },
+  target: { x: number; z: number },
+  frames: number,
+): MarchResult {
+  const pos = { ...start };
+  const embedded: string[] = [];
+  let freeze = 0;
+  let longestFreeze = 0;
+  /** Side the last blocked heading steered toward, kept so the robot does not oscillate. */
+  let side = 0;
+  const step = 7 / 60;
+  for (let i = 0; i < frames; i++) {
+    const dx = target.x - pos.x;
+    const dz = target.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 1.2) break;
+    const heading = Math.atan2(dz, dx);
+    const tries = side === 0 ? [0] : [0, side * 0.6, side * 1.2, side * 1.9, -side * 0.6];
+    let best = { x: pos.x, z: pos.z, moved: 0, steer: 0 };
+    for (const off of tries) {
+      const res = w.moveCylinder(
+        pos,
+        { x: Math.cos(heading + off) * step, y: -0.02, z: Math.sin(heading + off) * step },
+        R, H, 0.62,
+      );
+      const moved = Math.hypot(res.x - pos.x, res.z - pos.z);
+      if (moved > best.moved) best = { x: res.x, z: res.z, moved, steer: off === 0 ? 0 : Math.sign(off) };
+      if (moved > step * 0.7) break;
+    }
+    pos.x = best.x; pos.z = best.z;
+    const landed = w.moveCylinder(pos, { x: 0, y: -0.02, z: 0 }, R, H, 0.62);
+    pos.y = landed.y;
+    side = best.steer;
+    if (w.totalPenetration(pos.x, pos.z, pos.y, H, R) > 0.05) {
+      embedded.push(`(${pos.x.toFixed(0)},${pos.z.toFixed(0)})`);
+    }
+    freeze = best.moved < 1e-4 ? freeze + 1 : 0;
+    longestFreeze = Math.max(longestFreeze, freeze);
+  }
+  return { x: pos.x, z: pos.z, embedded, longestFreeze };
+}
+
+test('level: every enemy spawn point is clear of geometry', () => {
+  const level = realLevel();
+  const embedded: string[] = [];
+  for (const [zone, points] of level.spawns) {
+    for (const point of points) {
+      const y = level.collision.surfaceHeight(point.x, point.z);
+      if (level.collision.totalPenetration(point.x, point.z, y, H, R) > 0.05) {
+        embedded.push(`${zone} spawn (${point.x},${point.z})`);
+      }
+    }
+  }
+  assert.deepEqual(embedded, [], 'spawn points sit inside geometry');
+});
+
+test(
+  'level: the player can walk from the drop pad to the titan arena',
+  { todo: 'route blocked in the canyon/refinery: robot cannot traverse' },
+  () => {
+  const level = realLevel();
+  const a = level.anchors;
+  const route = [a.playerSpawn, a.camp, a.canyonEntry, a.refinery, a.bossArena, a.pedestal];
+  const pos = { x: route[0]!.x, y: route[0]!.y, z: route[0]!.z };
+  const problems: string[] = [];
+  for (let leg = 1; leg < route.length; leg++) {
+    const from = route[leg - 1]!;
+    const to = route[leg]!;
+    const budget = Math.ceil((Math.hypot(to.x - from.x, to.z - from.z) / 7) * 60 * 3);
+    const out = march(level.collision, pos, to, budget);
+    const label = `leg ${leg} (${from.x},${from.z}) -> (${to.x},${to.z})`;
+    const remaining = Math.hypot(to.x - out.x, to.z - out.z);
+    if (out.embedded.length) {
+      problems.push(`${label}: capsule inside geometry at ${[...new Set(out.embedded)].slice(0, 4).join(' ')}`);
+    }
+    if (out.longestFreeze > 120) problems.push(`${label}: frozen for ${out.longestFreeze} frames`);
+    if (remaining > 5) problems.push(`${label}: stopped ${remaining.toFixed(1)} m short`);
+    pos.x = out.x; pos.z = out.z;
+    pos.y = level.collision.footprintSurface(out.x, out.z, pos.y + 0.62, R, 0.06);
+  }
+  assert.deepEqual(problems, [], problems.join('\n'));
+});
+

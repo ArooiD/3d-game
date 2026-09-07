@@ -53,6 +53,8 @@ export class WorldBuilder {
       tags?: string[];
       /** Explicit collider size; defaults to the geometry bounds. */
       size?: { x: number; y: number; z: number };
+      /** Round the footprint to this radius, for cylinder props drawn as cylinders. */
+      radius?: number;
       noCollider?: boolean;
     } = {},
   ): THREE.Mesh {
@@ -86,6 +88,14 @@ export class WorldBuilder {
         topY: y + spanY.max,
         solid: opts.solid ?? true,
         tags: opts.tags ?? [],
+        // The AABB above only encloses the rotated footprint. Passing the yaw and
+        // the real half-extents is what lets a crate you can see be a crate you can
+        // walk up to: the enclosing box alone was a phantom wall around every
+        // rotated prop, widest at 45 degrees where it is 41% bigger than the mesh.
+        rotY: opts.rotateX ? undefined : (opts.rotateY || undefined),
+        halfX,
+        halfZ,
+        radius: opts.radius,
       });
     }
     return mesh;
@@ -178,11 +188,14 @@ export class WorldBuilder {
 
   /**
    * Bakes a merged mesh of many props into ONE draw call and registers a
-   * simplified set of colliders from the supplied footprint boxes.
+   * simplified set of colliders from the supplied footprint boxes. `rotY` keeps a
+   * rotated prop's collider matched to how it is drawn (the yawed mesh used to be
+   * an axis-aligned wall you could not walk up to), and `radius` gives round props
+   * a round footprint.
    */
   bakeMerged(
     mesh: THREE.Mesh,
-    colliders: { x: number; y: number; z: number; w: number; h: number; d: number; tags?: string[] }[],
+    colliders: { x: number; y: number; z: number; w: number; h: number; d: number; tags?: string[]; rotY?: number; radius?: number }[],
     solid = true,
   ): THREE.Mesh {
     mesh.updateMatrix();
@@ -200,6 +213,8 @@ export class WorldBuilder {
         topY: c.y + c.h,
         solid,
         tags: c.tags ?? ['prop'],
+        rotY: c.rotY,
+        radius: c.radius,
       });
     }
     return mesh;

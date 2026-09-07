@@ -52,6 +52,20 @@ interface Cell {
  * every frame, which reads as sticking to the edge while walking or falling.
  */
 const STEP_GRACE = 0.06;
+/**
+ * Depth below which contact is treated as clear. A body resting exactly on a face
+ * and then sliding along it re-reports float-rounding overshoot, and treating that
+ * noise as a wall made the sweep refuse the step outright.
+ */
+const CONTACT_EPS = 1e-9;
+
+/**
+ * How far a body is eased off a face when the sweep cannot find any free distance
+ * along the requested move. Two millimetres is below anything a player can see but
+ * enough to get around a convex corner, where every candidate step overshoots the
+ * curved contact by a hair however short the step is.
+ */
+const CONTACT_NUDGE = 0.002;
 const CELL_SIZE = 10;
 const EPSILON = 1e-4;
 /** Fraction of a height sample kept flat before it tapers down to the ground. */
@@ -167,6 +181,23 @@ export class CollisionWorld {
       box.minZ = cz - box.radius;
       box.maxZ = cz + box.radius;
       box.rotY = undefined;
+      box.halfX = undefined;
+      box.halfZ = undefined;
+    } else if (box.rotY) {
+      // Keep the real footprint and widen the AABB to enclose the yawed rect, the
+      // same way addBox does.
+      const cos = Math.abs(Math.cos(box.rotY));
+      const sin = Math.abs(Math.sin(box.rotY));
+      const hx = box.halfX ?? (box.maxX - box.minX) / 2;
+      const hz = box.halfZ ?? (box.maxZ - box.minZ) / 2;
+      const cx = (box.minX + box.maxX) / 2;
+      const cz = (box.minZ + box.maxZ) / 2;
+      box.halfX = hx;
+      box.halfZ = hz;
+      box.minX = cx - (hx * cos + hz * sin);
+      box.maxX = cx + (hx * cos + hz * sin);
+      box.minZ = cz - (hx * sin + hz * cos);
+      box.maxZ = cz + (hx * sin + hz * cos);
     }
     this.insert(box);
     return box;
@@ -287,6 +318,19 @@ export class CollisionWorld {
         result.z = freed.z;
         result.escaped = true;
       }
+      // Ring search only finds a free spot if it is a whole ring away. Contact with
+      // a yawed corner can leave the body a centimetre inside a face, where every
+      // candidate position is still "blocked" by that overshoot and the move is
+      // refused outright. Push that overshoot out along the contact normal first:
+      // the body can then slide along the face on this same step.
+      const embedded = this.deepestPush(result.x, result.z, result.y, height, radius);
+      if (embedded) {
+        result.x += embedded.px;
+        result.z += embedded.pz;
+        result.hitWall = true;
+        result.normalX = embedded.nx;
+        result.normalZ = embedded.nz;
+      }
       const supported = result.y <= this.footprintSurface(result.x, result.z, result.y, radius) + EPSILON;
       /** Ledge height gained by a step-up this sub-step, if any. */
       let steppedTo = Number.NEGATIVE_INFINITY;
@@ -373,6 +417,29 @@ export class CollisionWorld {
       // sub-step is longer than a thin wall, so committing the target first let the
       // body land inside the wall and the depenetration threw it out the far side.
       const reach = this.freeFraction(result.x, result.z, wantX, wantZ, y, height, radius);
+      if (reach <= 0) {
+        // Around a convex corner every candidate step, however short, overshoots
+        // the curved contact by a hair, so the sweep finds no free distance at all
+        // and the body hangs on the corner. Re-ask for the tangential part of the
+        // move with a two-millimetre allowance: enough to slip past the corner, far
+        // too small to notice. Any leftover overlap is pushed out next sub-step, and
+        // a head-on push into a flat wall still stops exactly at its face.
+        const nX = push.nx;
+        const nZ = push.nz;
+        const into = wantX * nX + wantZ * nZ;
+        const slideX = wantX - nX * into;
+        const slideZ = wantZ - nZ * into;
+        const slideFrac = this.freeFraction(result.x, result.z, slideX, slideZ, y, height, radius - CONTACT_NUDGE);
+        result.x += slideX * slideFrac;
+        result.z += slideZ * slideFrac;
+        hitWall = true;
+        nx = nX;
+        nz = nZ;
+        if (slideFrac >= 1) break;
+        wantX = slideX * (1 - slideFrac);
+        wantZ = slideZ * (1 - slideFrac);
+        continue;
+      }
       result.x += wantX * reach;
       result.z += wantZ * reach;
       hitWall = true;
@@ -522,7 +589,7 @@ export class CollisionWorld {
       const dz = z - cz;
       const reach = box.radius + radius;
       const d = Math.hypot(dx, dz);
-      if (d >= reach) return null;
+      if (d >= reach - CONTACT_EPS) return null;
       let nx: number;
       let nz: number;
       if (d < 1e-6) {
@@ -575,7 +642,7 @@ export class CollisionWorld {
       if (min === toMaxZ) { lnx = 0; lnz = 1; }
       depth = min;
     } else {
-      if (d >= radius) return null;
+      if (d >= radius - CONTACT_EPS) return null;
       lnx = dx / d;
       lnz = dz / d;
       depth = radius - d;

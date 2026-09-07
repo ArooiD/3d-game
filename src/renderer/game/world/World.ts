@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WORLD_HALF, WORLD_SIZE } from '../../../shared/constants';
+import { PLAYER_HEIGHT, PLAYER_RADIUS, WORLD_HALF, WORLD_SIZE } from '../../../shared/constants';
 import { RNG } from '../core/Rng';
 import type { CollisionWorld } from '../physics/CollisionWorld';
 import { WorldBuilder, mergeSimpleMeshes } from './WorldMeshes';
@@ -89,6 +89,7 @@ export class World {
     this.buildArena();
     this.scatterDebris();
     this.buildMapBoundary();
+    this.clearSpawnPoints();
 
     this.group.add(this.builder.group);
     this.scene.add(this.group);
@@ -135,6 +136,57 @@ export class World {
       zoneId,
       points.map((p) => ({ x: p.x, z: p.z, zone: zoneId })),
     );
+  }
+
+  /**
+   * Moves any spawn point a prop ended up sitting on top of. Enemies spawning
+   * inside geometry walk into it and jam against the wall, which reads to the
+   * player as an enemy that never shows up. Runs after every zone is built, so
+   * scatter debris and the boundary are already registered. The runtime escape
+   * search only covers a couple of metres, so a spawn buried in a large outcrop
+   * needs this wider ring; it is cheap because it happens once at level build.
+   */
+  private clearSpawnPoints(): void {
+    for (const [zoneId, points] of this.spawns) {
+      this.spawns.set(
+        zoneId,
+        points.map((p) => {
+          if (this.isStandable(p.x, p.z)) return p;
+          const near = this.collision.escapePosition(
+            p.x,
+            this.collision.surfaceHeight(p.x, p.z),
+            p.z,
+            PLAYER_RADIUS,
+            PLAYER_HEIGHT,
+          );
+          if (near && this.isStandable(near.x, near.z)) {
+            return { x: near.x, z: near.z, zone: zoneId };
+          }
+          const far = this.findFreeSpotAround(p.x, p.z);
+          return far ? { x: far.x, z: far.z, zone: zoneId } : p;
+        }),
+      );
+    }
+  }
+
+  private isStandable(x: number, z: number): boolean {
+    const y = this.collision.surfaceHeight(x, z);
+    return this.collision.totalPenetration(x, z, y, PLAYER_HEIGHT, PLAYER_RADIUS) <= 0.05;
+  }
+
+  /** Widening ring search for a spot a player-sized body can stand on. */
+  private findFreeSpotAround(x: number, z: number): { x: number; z: number } | null {
+    for (let ring = 1; ring <= 12; ring++) {
+      const r = ring * 1.5;
+      const samples = ring * 8;
+      for (let i = 0; i < samples; i++) {
+        const a = (i / samples) * Math.PI * 2;
+        const px = x + Math.cos(a) * r;
+        const pz = z + Math.sin(a) * r;
+        if (this.isStandable(px, pz)) return { x: px, z: pz };
+      }
+    }
+    return null;
   }
 
   // ------------------------------------------------------------ atmosphere
@@ -235,7 +287,7 @@ export class World {
     const geo = new THREE.IcosahedronGeometry(1, 1);
     this.disposables.push(geo);
     const placements: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
-    const colliders: { x: number; y: number; z: number; w: number; h: number; d: number }[] = [];
+    const colliders: { x: number; y: number; z: number; w: number; h: number; d: number; rotY?: number; radius?: number }[] = [];
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const euler = new THREE.Euler();
@@ -260,6 +312,7 @@ export class World {
           w: scale.x * 1.5,
           h: scale.y * 1.4,
           d: scale.z * 1.5,
+          rotY: euler.y,
         });
       }
     };
@@ -288,7 +341,7 @@ export class World {
       q.setFromEuler(euler);
       m.compose(pos, q, scale);
       accent.push({ geometry: geo, matrix: m.clone() });
-      accentColliders.push({ x: pos.x, y: 0, z: pos.z, w: scale.x * 1.4, h: scale.y * 1.3, d: scale.z * 1.4 });
+      accentColliders.push({ x: pos.x, y: 0, z: pos.z, w: scale.x * 1.4, h: scale.y * 1.3, d: scale.z * 1.4, rotY: euler.y });
     }
     const mergedAccent = mergeSimpleMeshes(accent);
     if (mergedAccent) {
@@ -392,7 +445,7 @@ export class World {
     const pitGeo = new THREE.CylinderGeometry(1.8, 2.1, 0.6, 10);
     const fireGeo = new THREE.IcosahedronGeometry(1.1, 0);
     this.disposables.push(pitGeo, fireGeo);
-    b.box(pitGeo, steel, x, 0.3, z, { tags: ['pit'] });
+    b.box(pitGeo, steel, x, 0.3, z, { tags: ['pit'], radius: 2.1 });
     const fire = b.decor(fireGeo, ember, x, 1.1, z);
     this.spinners.push({ mesh: fire, speed: 0.9 });
 
@@ -497,7 +550,9 @@ export class World {
 
     const left: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
     const right: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
-    const colliders: { x: number; y: number; z: number; w: number; h: number; d: number }[] = [];
+    type PropCollider = { x: number; y: number; z: number; w: number; h: number; d: number; rotY?: number };
+    const leftColliders: PropCollider[] = [];
+    const rightColliders: PropCollider[] = [];
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const e = new THREE.Euler();
@@ -521,21 +576,29 @@ export class World {
         e.set(0, this.rng.float(-0.4, 0.4), 0);
         q.setFromEuler(e);
         m.compose(p, q, s);
-        (dir > 0 ? left : right).push({ geometry: finGeo, matrix: m.clone() });
-        colliders.push({ x: p.x, y: 0, z: p.z, w: w * 1.05, h, d: d * 1.05 });
+        const collider: PropCollider = { x: p.x, y: 0, z: p.z, w: w * 1.05, h, d: d * 1.05, rotY: e.y };
+        if (dir > 0) {
+          left.push({ geometry: finGeo, matrix: m.clone() });
+          leftColliders.push(collider);
+        } else {
+          right.push({ geometry: finGeo, matrix: m.clone() });
+          rightColliders.push(collider);
+        }
       }
     }
 
-    for (const [list, mat, name] of [
-      [left, rock, 'canyon-left'],
-      [right, rockDark, 'canyon-right'],
+    // Each side used to bake the combined collider list, registering every fin
+    // twice and putting left-side walls on top of right-side meshes.
+    for (const [list, mats, name, sideColliders] of [
+      [left, rock, 'canyon-left', leftColliders],
+      [right, rockDark, 'canyon-right', rightColliders],
     ] as const) {
       const merged = mergeSimpleMeshes(list);
       if (!merged) continue;
-      const mesh = new THREE.Mesh(merged, mat);
+      const mesh = new THREE.Mesh(merged, mats);
       mesh.name = name;
       this.disposables.push(merged);
-      this.builder.bakeMerged(mesh, colliders, true);
+      this.builder.bakeMerged(mesh, sideColliders, true);
     }
 
     // Rock floor for the corridor so it reads differently from open sand.
@@ -614,7 +677,7 @@ export class World {
     const capGeo = new THREE.SphereGeometry(3.5, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
     this.disposables.push(siloGeo, capGeo);
     for (const [ox, oz] of [[-18, -14], [-9, -16], [-14, -5]]) {
-      b.box(siloGeo, plate, cx + ox, 6.5, cz + oz, { tags: ['silo'] });
+      b.box(siloGeo, plate, cx + ox, 6.5, cz + oz, { tags: ['silo'], radius: 3.6 });
       b.decor(capGeo, plate, cx + ox, 13, cz + oz);
     }
 
@@ -654,12 +717,20 @@ export class World {
       }
     }
 
-    // Conveyor gantry with a glowing intake.
+    // Conveyor gantry with a glowing intake. Carries the belt at head height: at
+    // 1.8 m the underside was a wall the player could not walk under, and it sat
+    // across the route out of the canyon.
     const gantryGeo = new THREE.BoxGeometry(4, 1.2, 26);
+    const gantryLegGeo = new THREE.BoxGeometry(0.6, 3.8, 0.6);
     const intakeGeo = new THREE.CylinderGeometry(2.2, 2.9, 3, 10);
-    this.disposables.push(gantryGeo, intakeGeo);
-    b.box(gantryGeo, b.material('belt', 0x4b4238), cx - 8, 2.4, cz + 6, { rotateY: 0.9, tags: ['gantry'] });
-    b.box(intakeGeo, rust, cx - 16, 1.5, cz + 12, { tags: ['intake'] });
+    this.disposables.push(gantryGeo, gantryLegGeo, intakeGeo);
+    b.box(gantryGeo, b.material('belt', 0x4b4238), cx - 8, 4.4, cz + 6, { rotateY: 0.9, tags: ['gantry'] });
+    const gcos = Math.cos(0.9);
+    const gsin = Math.sin(0.9);
+    for (const t of [-10, 0, 10]) {
+      b.box(gantryLegGeo, steel, cx - 8 + gcos * t, 1.9, cz + 6 + gsin * t, { tags: ['gantry-leg'] });
+    }
+    b.box(intakeGeo, rust, cx - 16, 1.5, cz + 12, { tags: ['intake'], radius: 2.9 });
     const intakeRing = new THREE.TorusGeometry(2.3, 0.3, 6, 16);
     intakeRing.rotateX(Math.PI / 2);
     this.disposables.push(intakeRing);
@@ -770,7 +841,7 @@ export class World {
     // Central pedestal that holds the quest reward.
     const pedGeo = new THREE.CylinderGeometry(1.6, 2.1, 1.35, 8);
     this.disposables.push(pedGeo);
-    b.box(pedGeo, b.material('pedestal', 0x9aa4b4), cx, 0.68, cz, { tags: ['pedestal'] });
+    b.box(pedGeo, b.material('pedestal', 0x9aa4b4), cx, 0.68, cz, { tags: ['pedestal'], radius: 2.1 });
 
     // Broken machinery around the rim for silhouette interest.
     const armGeo = new THREE.BoxGeometry(1.1, 7, 1.1);
@@ -806,7 +877,7 @@ export class World {
 
     const rockEntries: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
     const barrelEntries: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
-    const colliders: { x: number; y: number; z: number; w: number; h: number; d: number }[] = [];
+    const colliders: { x: number; y: number; z: number; w: number; h: number; d: number; rotY?: number; radius?: number }[] = [];
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const e = new THREE.Euler();
@@ -832,10 +903,11 @@ export class World {
       m.compose(p, q, s);
       rockEntries.push({ geometry: rockGeo, matrix: m.clone() });
       if (scale > 1.3) {
-        colliders.push({ x, y: 0, z, w: s.x * 1.4, h: s.y * 1.2, d: s.z * 1.4 });
+        colliders.push({ x, y: 0, z, w: s.x * 1.4, h: s.y * 1.2, d: s.z * 1.4, rotY: e.y });
       }
     }
 
+    const barrelColliders: typeof colliders = [];
     for (let i = 0; i < 46; i++) {
       const x = this.rng.float(-135, 135);
       const z = this.rng.float(-135, 135);
@@ -845,7 +917,9 @@ export class World {
       s.set(1, 1, 1);
       m.compose(p, q, s);
       barrelEntries.push({ geometry: barrelGeo, matrix: m.clone() });
-      colliders.push({ x, y: 0, z, w: 1.4, h: 1.6, d: 1.4 });
+      // Round footprint: a barrel is drawn as a cylinder, so it must not collide
+      // as a 1.4 m square that corners the player against invisible faces.
+      barrelColliders.push({ x, y: 0, z, w: 1.4, h: 1.6, d: 1.4, radius: 0.62 });
     }
 
     const rocks = mergeSimpleMeshes(rockEntries);
@@ -856,10 +930,6 @@ export class World {
     const barrels = mergeSimpleMeshes(barrelEntries);
     if (barrels) {
       this.disposables.push(barrels);
-      const barrelColliders = barrelEntries.map((entry) => {
-        const pos = new THREE.Vector3().setFromMatrixPosition(entry.matrix);
-        return { x: pos.x, y: 0, z: pos.z, w: 1.3, h: 1.6, d: 1.3 };
-      });
       this.builder.bakeMerged(new THREE.Mesh(barrels, barrelMat), barrelColliders, true);
     }
   }
