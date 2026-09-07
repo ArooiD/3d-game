@@ -90,6 +90,7 @@ export const GameEvents = {
   QuestCompleted: 'quest:completed',
   BossSpawned: 'boss:spawned',
   BossPhase: 'boss:phase',
+  BossSummon: 'boss:summon',
   BossKilled: 'boss:killed',
   SkillUnlocked: 'skill:unlocked',
   SkillPointChanged: 'skill:points',

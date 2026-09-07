@@ -131,3 +131,7 @@ export const BOSS_SUMMONS = ['raider', 'rusher'] as const;
 
 /** Capped so late-level scaling cannot make fights unkillable. */
 export const MAX_ENEMY_LEVEL_SCALE = 2.4;
+
+export function enemyDefinition(id: string): EnemyDefinition | null {
+  return ENEMY_DEFS[id] ?? null;
+}
