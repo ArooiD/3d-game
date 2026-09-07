@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { RARITY_HEX } from '../../../shared/constants';
-import { bus, GameEvents } from '../core/EventBus';
 import { rng } from '../core/Rng';
 
 /**
@@ -335,8 +334,6 @@ export class EffectsSystem {
     this.burst(point, { count: 26, color: 'spark', speed: radius * 1.6, life: 0.6, size: 1.5, gravity: 8 });
     this.burst(point, { count: 14, color: 'debris', speed: radius, life: 0.9, size: 1.3 });
     this.ring(point.clone().setY(point.y + 0.15), radius, 0xffa04a, 0.55);
-    void bus;
-    void GameEvents;
   }
 
   // ------------------------------------------------------------------ frame

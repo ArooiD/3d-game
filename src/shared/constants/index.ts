@@ -89,6 +89,9 @@ export function enemyLevelScale(level: number): number {
   return 1 + Math.max(0, level - 1) * 0.15;
 }
 
+/** Cap so a level 10 character still has a fair fight. */
+export const MAX_ENEMY_LEVEL_SCALE = 2.4;
+
 export function xpRequiredForLevel(level: number): number {
   return Math.round(XP_LEVEL_BASE * Math.pow(level, XP_LEVEL_EXPONENT));
 }

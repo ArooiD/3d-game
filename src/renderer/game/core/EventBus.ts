@@ -74,6 +74,8 @@ export const GameEvents = {
   EnemyDamaged: 'enemy:damaged',
   EnemySpawned: 'enemy:spawned',
   PlayerDamaged: 'player:damaged',
+  PlayerShieldBreak: 'player:shieldbreak',
+  PlayerShieldStart: 'player:shieldstart',
   PlayerDied: 'player:died',
   PlayerLevelUp: 'player:levelup',
   PlayerHealed: 'player:healed',

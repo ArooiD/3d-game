@@ -50,10 +50,22 @@ export interface WeaponStats {
   range: number;
   projectileSpeed: number;
   shieldDamageBonus: number;
+  /** Full-auto fire while the trigger is held. */
+  auto: boolean;
+  /** Screen shake impulse on fire. */
+  shake: number;
+  /** Fraction of damage removed past 60% of effective range. */
+  falloff: number;
+  /** Model tint + size for the first-person viewmodel. */
+  modelColor: number;
+  modelScale: [number, number, number];
 }
 
 export interface Weapon extends WeaponStats {
+  /** Base template id, e.g. "assault_rifle". */
   id: string;
+  /** Globally unique instance id used by inventory and save files. */
+  uid: string;
   name: string;
   weaponType: WeaponType;
   rarity: Rarity;

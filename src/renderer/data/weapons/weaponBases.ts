@@ -146,6 +146,10 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
 
 export const WEAPON_TYPE_LIST = Object.keys(WEAPON_BASES) as WeaponType[];
 
+export function baseFor(type: WeaponType): WeaponBase {
+  return WEAPON_BASES[type] ?? (WEAPON_BASES.assault_rifle as WeaponBase);
+}
+
 /** Per-level growth applied to damage so loot stays relevant as you rank up. */
 export const WEAPON_LEVEL_DAMAGE_GROWTH = 0.16;
 export const WEAPON_LEVEL_MAG_GROWTH = 0.05;

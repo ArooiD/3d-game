@@ -72,3 +72,36 @@ export const LEGENDARY_NAMES = [
   'Sun Eater',
   'Rust Sermon',
 ];
+
+import type { RNG } from '../../game/core/Rng';
+
+/**
+ * Assembles a weapon name as Prefix + Base + Suffix. Legendaries draw from the
+ * named table so the best drops feel like unique finds.
+ */
+export function pickName(
+  base: { type: WeaponType; label: string },
+  rarity: string,
+  rng: RNG,
+): string {
+  if (rarity === 'legendary') {
+    const famous = rng.pick(LEGENDARY_NAMES);
+    const code = `${NAME_MODEL_CODES[base.type]}-${rng.int(1, 99)}`;
+    return `${famous} ${code}`;
+  }
+
+  const prefix = rng.pick(NAME_PREFIXES);
+  const baseName = rng.pick(NAME_BASES[base.type]);
+  const code = `${NAME_MODEL_CODES[base.type]}-${rng.int(1, 12)}`;
+
+  if (rarity === 'epic') {
+    return `${prefix} ${baseName} ${rng.pick(NAME_SUFFIXES)}`;
+  }
+  if (rarity === 'rare') {
+    return rng.bool(0.5) ? `${prefix} ${baseName} ${code}` : `${prefix} ${baseName}`;
+  }
+  if (rarity === 'uncommon') {
+    return `${prefix} ${baseName}`;
+  }
+  return `${baseName} ${code}`;
+}
