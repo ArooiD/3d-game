@@ -276,3 +276,23 @@ test('viewmodel hands are not coplanar: separated in X/Y and yawed apart', () =>
   }
 });
 
+
+// Sculpted surfaces must face outward: inverted winding makes faces disappear
+// under back-face culling and makes front-facing headshots miss the new mesh.
+test('human faces are front-facing ray targets and follow the animated head', () => {
+  for (const id of ['vanguard', 'ranger', 'engineer'] as CharacterId[]) {
+    const actor = buildCharacterModel(id, { holdWeapon: false });
+    const face = actor.meshes.find(mesh => mesh.name === 'human-face')!;
+    assert.ok(face, `${id} has no human face`);
+    assert.equal(face.parent, actor.skeleton.bones.get('head'));
+    actor.root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(face);
+    const center = bounds.getCenter(new THREE.Vector3());
+    const ray = new THREE.Raycaster(new THREE.Vector3(center.x, center.y, bounds.min.z - 1), new THREE.Vector3(0, 0, 1));
+    assert.ok(ray.intersectObject(face, false).length > 0, `${id} face winding is inverted`);
+    actor.skeleton.bones.get('head')!.rotation.y += .4;
+    actor.root.updateMatrixWorld(true);
+    assert.notDeepEqual(new THREE.Box3().setFromObject(face).min.toArray(), bounds.min.toArray());
+    actor.dispose();
+  }
+});

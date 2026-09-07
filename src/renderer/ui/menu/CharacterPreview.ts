@@ -63,7 +63,7 @@ export class CharacterPreview {
   /** Builds one card's body. Geometry only, so this stays cheap. */
   addSlot(canvas: HTMLCanvasElement, characterId: CharacterId): void {
     if (this.slots.has(canvas)) return;
-    const character = buildCharacterModel(characterId, { holdWeapon: true, name: `preview-${characterId}` });
+    const character = buildCharacterModel(characterId, { holdWeapon: false, name: `preview-${characterId}` });
     this.slots.set(canvas, { context: canvas.getContext('2d'), character });
   }
 
@@ -94,7 +94,7 @@ export class CharacterPreview {
     }
 
     this.spin += this.clock.getDelta() * 0.55;
-    slot.character.root.rotation.y = Math.sin(this.spin) * 0.6;
+    slot.character.root.rotation.y = Math.PI + Math.sin(this.spin) * 0.6;
 
     this.renderer.render(this.scene, this.camera);
     slot.context.clearRect(0, 0, PREVIEW_SIZE, PREVIEW_SIZE);

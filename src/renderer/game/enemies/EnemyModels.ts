@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { humanLimb, humanTorso, addHumanFace } from '../player/HumanGeometry';
 import type { EnemyBehavior, EnemyDefinition } from '../../../shared/types';
 import { MAX_ENEMY_LEVEL_SCALE } from '../../data/enemies/enemies';
 import { enemyLevelScale } from '../../../shared/constants';
@@ -6,11 +8,11 @@ import { Skeleton, type BoneName } from '../anim/Rig';
 import { EnemyAnimator } from '../anim/EnemyAnimator';
 
 /**
- * Procedural enemy bodies: a segmented skeleton with rigid low-poly shells
+ * Contoured enemy bodies on the shared animation skeleton
  * parented to the bones, so the animation layer can drive real joints instead of
  * rotating whole meshes.
  *
- * Geometry is one shared unit box (plus a cylinder and a torus) scaled per part,
+ * Anatomical surfaces and bevelled equipment buffers are shared across actors,
  * and materials are cached per definition, so N enemies of a type add no buffers
  * and no new materials.
  */
@@ -61,14 +63,13 @@ const PROPORTIONS: Record<EnemyBehavior, Proportions> = {
   },
 };
 
-const unit = new THREE.BoxGeometry(1, 1, 1);
+const unit = new RoundedBoxGeometry(1, 1, 1, 3, .09);
 const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
 const ring = new THREE.TorusGeometry(1, 0.06, 6, 20);
 /** Limb, skull and torso shapes: a hostile made of boxes reads as a moving crate. */
-const capsule = new THREE.CapsuleGeometry(0.5, 1, 3, 10);
-const sphere = new THREE.SphereGeometry(0.5, 12, 8);
-const prism = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
-const dome = new THREE.SphereGeometry(0.5, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+const sphere = new THREE.SphereGeometry(0.5, 24, 16);
+const prism = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+const dome = new THREE.SphereGeometry(0.5, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
 
 export interface BuiltEnemy {
   skeleton: Skeleton;
@@ -90,12 +91,23 @@ export class EnemyFactory {
   private materials = new Map<string, THREE.MeshLambertMaterial>();
 
   create(def: EnemyDefinition): BuiltEnemy {
-    const p = PROPORTIONS[def.behavior] ?? PROPORTIONS.raider;
+    const source = PROPORTIONS[def.behavior] ?? PROPORTIONS.raider;
+    // Humanoid dimensions are fractions of standing height. The former values
+    // made the leg chain alone nearly a full body tall, burying the feet.
+    const p: Proportions = def.behavior === 'boss' ? source : {
+      ...source, hipHeight: .53, torsoHeight: .27,
+      torsoWidth: def.behavior === 'heavy' ? .32 : .25,
+      torsoDepth: def.behavior === 'heavy' ? .20 : .15,
+      shoulderWidth: def.behavior === 'heavy' ? .35 : .28,
+      upperArm: .18, forearm: .16, limbThickness: .075,
+      thigh: .245, shin: .235, legThickness: .105,
+      headSize: .14, neckLength: .035,
+    };
     const height = def.height;
     // Per-instance materials for anything that flashes on hit; shared ones are
     // cached per definition and never tinted.
-    const body = new THREE.MeshLambertMaterial({ color: def.colorHex, flatShading: true });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x2b2f38, flatShading: true });
+    const body = new THREE.MeshLambertMaterial({ color: def.colorHex, flatShading: false });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x2b2f38, flatShading: false });
     const accent = this.material('accent', def.accentHex, def, true);
     const trim = this.material('trim', 0x1b1e24, def);
 
@@ -135,7 +147,7 @@ export class EnemyFactory {
       length: number,
       y: number,
       material: THREE.Material,
-    ): THREE.Mesh => shell(parent, thickness, length / 2, thickness, 0, y, 0, material, true, capsule);
+    ): THREE.Mesh => shell(parent, thickness, length * 1.10, thickness, 0, y, 0, material, true, humanLimb);
 
     const tube = (
       parent: THREE.Object3D,
@@ -174,7 +186,7 @@ export class EnemyFactory {
     const armHang = def.behavior === 'rusher' ? -6 : -2;
     for (const side of [-1, 1] as const) {
       const tag = side < 0 ? 'L' : 'R';
-      skeleton.bone(`shoulder${tag}`, chest, side * p.shoulderWidth * 0.5, shoulderY, 0);
+      skeleton.bone(`shoulder${tag}`, chest, side * p.shoulderWidth * (def.behavior === 'boss' ? 1 : height) * 0.5, shoulderY, 0);
       skeleton.setBind(`shoulder${tag}`, 0, 0, side * 4);
       skeleton.bone(`arm${tag}`, skeleton.bones.get(`shoulder${tag}`)!, 0, -height * 0.02, 0);
       skeleton.setBind(`arm${tag}`, armHang, 0, side * 6);
@@ -199,20 +211,23 @@ export class EnemyFactory {
     // Scaling the octagon past 1 in depth gives a barrel chest from the front
     // while leaving flat flanks for the plates to sit on.
     shell(hips, torsoW * 0.92, torsoH * 0.3, torsoD * 1.15, 0, torsoH * 0.02, 0, dark, true, prism);
-    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 1.2, 0, torsoH * 0.22, 0, body, true, prism);
-    shell(chest, torsoW, torsoH * 0.52, torsoD * 1.25, 0, torsoH * 0.16, 0, body, true, prism);
+    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 1.2, 0, torsoH * 0.22, 0, body, true, humanTorso);
+    shell(chest, torsoW, torsoH * 0.52, torsoD * 1.25, 0, torsoH * 0.16, 0, body, true, humanTorso);
     shell(chest, torsoW * 0.72, torsoH * 0.22, torsoD * 0.42, 0, torsoH * 0.34, -torsoD * 0.6, trim);
 
     const headSize = p.headSize * height;
-    const headShell = shell(head, headSize, headSize, headSize * 0.95, 0, headSize * 0.44, 0, dark, true, sphere);
+    const headShell = def.behavior === 'boss'
+      ? shell(head, headSize, headSize, headSize * 0.95, 0, headSize * 0.44, 0, dark, true, sphere)
+      : addHumanFace(head, headSize, def.behavior === 'rusher' ? 0xad8063 : 0xb48e72, meshes);
     // The visor owns a per-instance material: it is the state/headshot lamp.
     const indicatorMaterial = (accent as THREE.MeshLambertMaterial).clone();
     const indicatorShell = new THREE.Mesh(sphere, indicatorMaterial);
     indicatorShell.scale.set(headSize * 0.8, headSize * 0.22, headSize * 0.3);
-    indicatorShell.position.set(0, headSize * 0.48, -headSize * 0.4);
+    indicatorShell.position.set(headSize * .46, headSize * 0.65, 0);
+    indicatorShell.scale.set(headSize * .12, headSize * .12, headSize * .12);
     head.add(indicatorShell);
     meshes.push(indicatorShell);
-    shell(head, headSize * 0.92, headSize * 0.3, headSize * 0.88, 0, headSize * 0.66, 0, trim, false, dome);
+    shell(head, headSize * 0.92, headSize * 0.3, headSize * 0.88, 0, headSize * 0.84, 0, trim, false, dome);
 
     for (const side of [-1, 1] as const) {
       const tag = side < 0 ? 'L' : 'R';
@@ -407,7 +422,7 @@ export class EnemyFactory {
     if (existing) return existing;
     const mat = new THREE.MeshLambertMaterial({
       color,
-      flatShading: true,
+      flatShading: false,
       emissive: emissive ? new THREE.Color(color).multiplyScalar(0.55) : 0x000000,
     });
     this.materials.set(cacheKey, mat);
@@ -423,7 +438,6 @@ export class EnemyFactory {
     unit.dispose();
     cylinder.dispose();
     ring.dispose();
-    capsule.dispose();
     sphere.dispose();
     prism.dispose();
     dome.dispose();
