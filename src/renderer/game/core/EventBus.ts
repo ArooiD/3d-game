@@ -72,6 +72,7 @@ export const bus = new EventBus();
 export const GameEvents = {
   EnemyKilled: 'enemy:killed',
   EnemyDamaged: 'enemy:damaged',
+  EnemyPartBroken: 'enemy:part-broken',
   EnemySpawned: 'enemy:spawned',
   PlayerDamaged: 'player:damaged',
   PlayerShieldBreak: 'player:shieldbreak',
