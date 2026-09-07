@@ -200,8 +200,17 @@ export class PlayerController {
 
     const landed = !this.grounded && result.grounded;
     if (result.hitCeiling && this.velocity.y > 0) this.velocity.y = 0;
-    if (Math.abs(result.x - this.position.x - delta.x) > 0.001) this.velocity.x = 0;
-    if (Math.abs(result.z - this.position.z - delta.z) > 0.001) this.velocity.z = 0;
+    if (result.hitWall) {
+      // Project the horizontal velocity onto the face that stopped the body.
+      // Zeroing whole world axes kept the tangential speed only for axis-aligned
+      // walls and dead-stopped the player at an outer corner or against any prop
+      // that was not square to the map.
+      const into = this.velocity.x * result.normalX + this.velocity.z * result.normalZ;
+      if (into < 0) {
+        this.velocity.x -= result.normalX * into;
+        this.velocity.z -= result.normalZ * into;
+      }
+    }
     this.position.set(result.x, result.y, result.z);
     this.grounded = result.grounded;
 

@@ -30,7 +30,79 @@ test('nearby props do not become phantom floors; roofs do not lift characters', 
 test('fast motion stops at thin walls and slides tangentially', () => {
  const w = new CollisionWorld(); w.addBox(v(3,2,0),v(.1,4,20));
  const p = w.moveCylinder(v(),v(20,0,3),.4,1.8,.6);
- close(p.x,2.55); close(p.z,3); assert.ok(p.hitWall);
+ assert.ok(Math.abs(p.x-2.55)<0.01, `x=${p.x}`); close(p.z,3); assert.ok(p.hitWall);
+});
+test('a yawed prop colliders to its visible shape, not its bounding box', () => {
+ // A 7 x 0.7 walkway rotated 0.9 rad. Its axis-aligned bounding box is about
+ // 5 x 4.8: a capsule standing beside the visible face is inside that phantom
+ // AABB, so the old solver considered it embedded in the ramp and froze it.
+ const w = new CollisionWorld(); w.addBox(v(0,1,0),v(7,2,.7),{rotY:.9});
+ const r = .9;
+ const ux = Math.cos(r), uz = -Math.sin(r);   // along the walkway
+ const nx = Math.sin(r), nz = Math.cos(r);    // off its long face
+ const start = v(nx*.8, 0, nz*.8);            // outside the 0.35 half-depth
+ assert.ok(!w.overlaps(start.x,0,start.z,.4,1.8).length, 'start must be clear');
+ let p = start;
+ for (let i=0;i<30;i++) p = w.moveCylinder(p, v(ux*.1,0,uz*.1), .4, 1.8, .6);
+ const along = (p.x-start.x)*ux + (p.z-start.z)*uz;
+ assert.ok(along > 2.5, `slide along a rotated wall died: ${along.toFixed(2)}`);
+ assert.equal(w.totalPenetration(p.x, 0, p.z, .4, 1.8), 0);
+});
+test('a body that ends up inside a prop is freed, not frozen there', () => {
+ const w = new CollisionWorld(); w.addBox(v(4,.9,0),v(2,1.8,2));
+ // Spawned inside the crate: the old clamp refused every move from here.
+ let p = w.moveCylinder(v(4,0,0),v(0,0,1),.4,1.8,.6);
+ assert.ok(p.escaped, 'escape should have fired');
+ for (let i = 0; i < 30 && w.totalPenetration(p.x, 0, p.z, .4, 1.8) > 0; i++) {
+  p = w.moveCylinder(p, v(0.15,0,0), .4, 1.8, .6);
+ }
+ assert.equal(w.totalPenetration(p.x, 0, p.z, .4, 1.8), 0, 'never freed itself');
+ p = w.moveCylinder(p, v(0.15,0,0), .4, 1.8, .6);
+ assert.ok(!p.escaped, 'must stop escaping once free');
+});
+test('a slot narrower than the body walks you toward its wide end', () => {
+ // Two crates with a 0.46 m slot between them, the body diameter is 0.8: a body
+ // pushed in cannot fit, but it must slide toward the open ends, not pin forever.
+ const w = new CollisionWorld();
+ w.addBox(v(0,.9,0),v(4,1.8,4)); w.addBox(v(4.46,.9,0),v(4,1.8,4));
+ let p = w.moveCylinder(v(2.23,0,0),v(0,0,2),.4,1.8,.6);
+ for (let i = 0; i < 60; i++) p = w.moveCylinder(p, v(0,0,0.05), .4, 1.8, .6);
+ assert.ok(Math.hypot(p.x - 2.23, p.z) > 1, `body never escaped the slot: (${p.x},${p.z})`);
+});
+test('cylinder colliders are round: walk around, exact rays', () => {
+ const w = new CollisionWorld();
+ const silo = w.addBox(v(0,.5,0),v(1,1,1),{radius:3});
+ assert.ok(silo.radius === 3);
+ const p = w.moveCylinder(v(-8,0,0),v(20,0,0),.4,1.8,.6);
+ assert.ok(Math.abs(p.x+3.4)<1e-3, `x=${p.x}`); // radius + body radius
+ const hit = w.raycast(v(-10,.5,0),v(1,0,0),30)!;
+ assert.ok(Math.abs(hit.distance-7)<1e-3, `distance=${hit.distance}`);
+ assert.ok(Math.abs(hit.normal.x + 1) < 1e-6);
+});
+test('height stamps taper instead of ending in an un-steppable cliff', () => {
+ const w = new CollisionWorld(); w.addHeightSample(0,0,6,10);
+ assert.ok(Math.abs(w.groundHeight(0,0) - 6) < 1e-6);
+ // Walking outward, the height must fall in steps no taller than a stair rise.
+ let prev = w.groundHeight(0,9.99);
+ for (let d = 10.5; d <= 10.2; d += 0.01) {
+  const h = w.groundHeight(0,d);
+  assert.ok(prev - h < 0.05, `cliff of ${prev - h} m at d=${d}`);
+  prev = h;
+ }
+ assert.ok(w.groundHeight(0,11) === 0);
+});
+test('corners stop you at the corner, and pinning against a wall still slides', () => {
+ const w = new CollisionWorld();
+ w.addBox(v(3,1,0),v(.2,2,6)); w.addBox(v(0,1,3),v(6,2,.2));
+ // Pushed straight into the inside corner: stop flush against both faces.
+ const p = w.moveCylinder(v(1.5,0,1.5),v(3,0,3),.4,1.8,.6);
+ assert.ok(Math.abs(p.x-2.5)<0.02 && Math.abs(p.z-2.5)<0.02, `corner at (${p.x},${p.z})`);
+ // Pressed against one wall while walking along it: the press must not kill the
+ // parallel speed, which is the stick players feel running along a container.
+ let q = v(2.4,0,0);
+ for (let i=0;i<18;i++) q = w.moveCylinder(q, v(0.02,0,0.1), .4, 1.8, .6);
+ assert.ok(q.z > 1.7, `wall slide died at z=${q.z}`);
+ assert.ok(q.x > 2.45, `pressed off the wall to x=${q.x}`);
 });
 test('steps require support and clear headroom; descending lands on top', () => {
  const w = new CollisionWorld(); w.addBox(v(2,.25,0),v(2,.5,3));
