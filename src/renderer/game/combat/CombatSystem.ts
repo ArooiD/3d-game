@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import type { Weapon } from '../../../shared/types';
 import { rayCylinder } from '../enemies/TargetRegistry';
+import { EnemyPartsSystem, type EnemyPartDamageResult, type EnemyPartId } from '../enemies/EnemyParts';
 import { rng } from '../core/Rng';
+import { bus, GameEvents } from '../core/EventBus';
 import type { CollisionWorld } from '../physics/CollisionWorld';
 import type { EffectsSystem } from '../effects/EffectsSystem';
 import type { TargetGrid, TargetRegistry } from '../enemies/TargetRegistry';
@@ -9,7 +11,8 @@ import type { TargetGrid, TargetRegistry } from '../enemies/TargetRegistry';
 /**
  * Hitscan + projectile combat shared by the player and the enemies. Enemy bodies
  * are registered with a TargetRegistry so shot resolution never iterates the
- * scene graph.
+ * scene graph. EnemyParts adds an animated anatomical hit layer on top of that
+ * coarse registry without coupling combat to EnemyModels.
  */
 
 export interface HitResult {
@@ -18,6 +21,7 @@ export interface HitResult {
   normal: THREE.Vector3;
   distance: number;
   headshot: boolean;
+  part: EnemyPartId | null;
   worldHit: boolean;
 }
 
@@ -42,6 +46,7 @@ export class CombatSystem {
   private projectiles: Projectile[] = [];
   private scratch = new THREE.Vector3();
   private scratchDir = new THREE.Vector3();
+  private enemyParts = new EnemyPartsSystem();
 
   stats = { shotsFired: 0, shotsHit: 0 };
 
@@ -56,7 +61,7 @@ export class CombatSystem {
     this.projectileMatHostile = new THREE.MeshBasicMaterial({ color: 0xff6a3d, fog: false });
   }
 
-  /** Resolve one hitscan shot, including spread, falloff, crits and headshots. */
+  /** Resolve one hitscan shot, including spread, falloff, crits and body parts. */
   fireHitscan(context: ShotContext): HitResult[] {
     const results: HitResult[] = [];
     const pellets = Math.max(1, context.weapon.pellets ?? 1);
@@ -77,21 +82,27 @@ export class CombatSystem {
         anyHit = true;
         const critical = rng.bool(context.criticalChance);
         const critMul = critical ? context.criticalMultiplier : 1;
-        const finalDamage = context.damage * damageMul * critMul;
-        hit.target.applyDamage(finalDamage, {
-          headshot: hit.headshot,
+        const rawDamage = context.damage * damageMul * critMul;
+        const partDamage = this.enemyParts.applyDamage(hit.target, hit.part, rawDamage);
+        const headshot = hit.headshot || partDamage.headshot;
+
+        hit.target.applyDamage(partDamage.bodyDamage, {
+          headshot,
           critical,
           shieldBonus: context.weapon.shieldDamageBonus + context.shieldBonus,
           direction: dir,
           fromPlayer: context.source === 'player',
         });
-        this.effects.fleshHit(point, critical);
+        if (partDamage.destroyed) this.emitPartBreak(hit.target, partDamage, point);
+
+        this.effects.fleshHit(point, critical || partDamage.criticalPart);
         results.push({
           target: hit.target,
           point,
           normal: hit.normal,
           distance: hit.distance,
-          headshot: hit.headshot,
+          headshot,
+          part: partDamage.part,
           worldHit: false,
         });
       } else if (hit.worldHit) {
@@ -102,6 +113,7 @@ export class CombatSystem {
           normal: hit.normal,
           distance: hit.distance,
           headshot: false,
+          part: null,
           worldHit: true,
         });
       }
@@ -111,26 +123,47 @@ export class CombatSystem {
     return results;
   }
 
-  /** Trace a ray against enemy capsules first, then world geometry. */
+  /** Trace a ray against animated enemy parts first, then the legacy body capsule. */
   trace(
     origin: THREE.Vector3,
     dir: THREE.Vector3,
     maxDistance: number,
     ignore?: TargetRegistry,
-  ): { target: TargetRegistry | null; point: THREE.Vector3; normal: THREE.Vector3; distance: number; headshot: boolean; worldHit: boolean } {
+  ): {
+    target: TargetRegistry | null;
+    point: THREE.Vector3;
+    normal: THREE.Vector3;
+    distance: number;
+    headshot: boolean;
+    part: EnemyPartId | null;
+    worldHit: boolean;
+  } {
     const worldHit = this.collision.raycast(origin, dir, maxDistance);
     let bestDistance = worldHit ? worldHit.distance : maxDistance;
     let bestTarget: TargetRegistry | null = null;
     let headshot = false;
+    let part: EnemyPartId | null = null;
 
     const candidates = this.targets.queryRay(origin, dir, bestDistance);
     for (const candidate of candidates) {
       if (candidate === ignore) continue;
-      const hit = candidate.rayHit(origin, dir, bestDistance);
-      if (hit && hit.distance < bestDistance) {
-        bestDistance = hit.distance;
-        bestTarget = candidate;
-        headshot = hit.headshot;
+
+      // Precise animated spheres cover head/torso/limbs. The old finite cylinder
+      // remains a safety net for tiny gaps between joints and for non-humanoid
+      // targets that do not expose the standard skeleton names.
+      const anatomical = this.enemyParts.rayHit(candidate, origin, dir, bestDistance);
+      const fallback = anatomical ? null : candidate.rayHit(origin, dir, bestDistance);
+      const distance = anatomical?.distance ?? fallback?.distance;
+      if (distance === undefined || distance >= bestDistance) continue;
+
+      bestDistance = distance;
+      bestTarget = candidate;
+      if (anatomical) {
+        part = anatomical.part;
+        headshot = anatomical.headshot;
+      } else {
+        headshot = Boolean(fallback?.headshot);
+        part = headshot ? 'head' : 'torso';
       }
     }
 
@@ -150,6 +183,7 @@ export class CombatSystem {
       normal,
       distance: bestDistance,
       headshot,
+      part,
       worldHit: !bestTarget && Boolean(worldHit),
     };
   }
@@ -228,24 +262,51 @@ export class CombatSystem {
       const wall = this.collision.raycast(origin, dir, distance, projectile.radius);
       let hitDistance = wall?.distance ?? distance;
       let target: TargetRegistry | null = null;
+      let targetPart: EnemyPartId | null = null;
       let hitPlayer = false;
+
       if (projectile.fromPlayer) {
         for (const candidate of this.targets.queryRay(origin, dir, hitDistance)) {
-          const hit = rayCylinder(origin, dir, candidate.position, candidate.radius + projectile.radius,
-            candidate.position.y - projectile.radius, candidate.position.y + candidate.height + projectile.radius, hitDistance);
-          if (hit && hit.distance < hitDistance) { hitDistance = hit.distance; target = candidate; }
+          const anatomical = this.enemyParts.rayHit(candidate, origin, dir, hitDistance);
+          const body = rayCylinder(
+            origin,
+            dir,
+            candidate.position,
+            candidate.radius + projectile.radius,
+            candidate.position.y - projectile.radius,
+            candidate.position.y + candidate.height + projectile.radius,
+            hitDistance,
+          );
+
+          const anatomicalDistance = anatomical?.distance ?? Number.POSITIVE_INFINITY;
+          const bodyDistance = body?.distance ?? Number.POSITIVE_INFINITY;
+          const nearest = Math.min(anatomicalDistance, bodyDistance);
+          if (nearest < hitDistance) {
+            hitDistance = nearest;
+            target = candidate;
+            if (anatomicalDistance <= bodyDistance && anatomical) targetPart = anatomical.part;
+            else targetPart = body?.headshot ? 'head' : 'torso';
+          }
         }
       } else if (player?.alive) {
         const hit = rayCylinder(origin, dir, player.position, player.radius + projectile.radius,
           player.position.y - projectile.radius, player.position.y + player.height + projectile.radius, hitDistance);
         if (hit && hit.distance < hitDistance) { hitDistance = hit.distance; hitPlayer = true; }
       }
+
       projectile.mesh.position.copy(origin).addScaledVector(dir, hitDistance);
       const point = projectile.mesh.position.clone();
       if (target && !projectile.explosive) {
-        target.applyDamage(projectile.damage, { headshot: false, critical: projectile.critical,
-          shieldBonus: projectile.shieldBonus, direction: dir, fromPlayer: true });
-        this.effects.fleshHit(point, projectile.critical);
+        const partDamage = this.enemyParts.applyDamage(target, targetPart, projectile.damage);
+        target.applyDamage(partDamage.bodyDamage, {
+          headshot: partDamage.headshot,
+          critical: projectile.critical,
+          shieldBonus: projectile.shieldBonus,
+          direction: dir,
+          fromPlayer: true,
+        });
+        if (partDamage.destroyed) this.emitPartBreak(target, partDamage, point);
+        this.effects.fleshHit(point, projectile.critical || partDamage.criticalPart);
       }
       if (hitPlayer) onPlayerDamage(projectile.damage, point);
       if (wall && !target && !hitPlayer) this.effects.impactHit(point, wall.normal);
@@ -265,7 +326,9 @@ export class CombatSystem {
       if (!fromPlayer || !target.hostile || !this.collision.hasLineOfSight(center, target.centre)) continue;
       const distance = target.distanceTo(center);
       const falloff = 1 - Math.min(1, distance / Math.max(0.01, radius)) * 0.55;
-      target.applyDamage(damage * falloff, {
+      const rawDamage = damage * falloff;
+      const partDamage = this.enemyParts.applyDamage(target, 'torso', rawDamage);
+      target.applyDamage(partDamage.bodyDamage, {
         headshot: false,
         critical: false,
         shieldBonus,
@@ -273,6 +336,7 @@ export class CombatSystem {
         fromPlayer,
         explosion: true,
       });
+      if (partDamage.destroyed) this.emitPartBreak(target, partDamage, target.centre.clone());
     }
   }
 
@@ -287,9 +351,21 @@ export class CombatSystem {
 
   dispose(): void {
     this.clearProjectiles();
+    this.enemyParts.clear();
     this.projectileGeo.dispose();
     this.projectileMatFriendly.dispose();
     this.projectileMatHostile.dispose();
+  }
+
+  private emitPartBreak(target: TargetRegistry, result: EnemyPartDamageResult, point: THREE.Vector3): void {
+    bus.emit(GameEvents.EnemyPartBroken, {
+      id: target.id,
+      part: result.part,
+      point: point.clone(),
+      isBoss: target.isBoss,
+      integrity: result.integrity,
+      maxIntegrity: result.maxIntegrity,
+    });
   }
 }
 
