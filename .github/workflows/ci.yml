@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, build and smoke-test on Linux
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Xvfb (headless Electron needs a display)
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build dev bundle
+        run: node scripts/build.mjs --dev
+
+      - name: Headless smoke test (full loot/progression loop)
+        run: node scripts/headless-test.mjs
+
+      - name: Upload dev bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-bundle
+          path: dist/
+          retention-days: 7
+          if-no-files-found: ignore

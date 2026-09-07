@@ -12,18 +12,94 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "npm run build && electron .",
     "test:headless": "npm run build && node scripts/headless-test.mjs",
-    "preview": "npm run build && electron ."
+    "preview": "npm run build && electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run build && electron-builder",
+    "dist:dir": "npm run build && electron-builder --dir"
   },
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.4.1",
     "@types/three": "^0.171.0",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.24.2",
+    "three": "^0.171.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
   },
-  "dependencies": {
-    "three": "^0.171.0"
+  "author": "shokin-code <shokin-code@dev.istok.ru>",
+  "build": {
+    "appId": "ru.istok.dustfall-outpost",
+    "productName": "Dustfall Outpost",
+    "copyright": "Copyright (c) 2026 shokin-code",
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "!**/*.map"
+    ],
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "shortcutName": "Dustfall Outpost"
+    },
+    "portable": {
+      "artifactName": "${name}-${version}-win-portable.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
+      ],
+      "category": "public.app-category.action-games",
+      "identity": null,
+      "hardenedRuntime": false
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Game",
+      "synopsis": "Single-player 3D looter-shooter set in a desert sci-fi outpost.",
+      "description": "Single-player 3D looter-shooter vertical slice: explore a desert sci-fi outpost, fight procedural enemies, loot generated weapons and take on the Scrap Titan.",
+      "desktop": {
+        "Name": "Dustfall Outpost",
+        "GenericName": "Game",
+        "Comment": "3D looter-shooter",
+        "Categories": "Game;"
+      }
+    }
   }
 }
