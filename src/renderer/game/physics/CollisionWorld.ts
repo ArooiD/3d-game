@@ -311,12 +311,24 @@ export class CollisionWorld {
     for (let i = 0; i < steps; i++) {
       // A body that starts a step inside geometry has no legal move: every face
       // reports a penetration and a per-axis clamp simply refuses to move it,
-      // which froze the player until respawn. Free it first.
-      const freed = this.escapePosition(result.x, result.y, result.z, radius, height, { x: dx, z: dz });
-      if (freed) {
-        result.x = freed.x;
-        result.z = freed.z;
-        result.escaped = true;
+      // which froze the player until respawn. Free it first - unless the geometry
+      // it overlaps is a low ledge it could simply step onto: escaping sideways
+      // from that threw the body back off the ledge every frame it approached one,
+      // so the ledge edge became an oscillation rather than a step.
+      const sunk = this.deepestPush(result.x, result.z, result.y, height, radius);
+      const canRiseOnto =
+        !!sunk &&
+        dy <= 0 &&
+        sunk.box.topY > result.y &&
+        sunk.box.topY - result.y <= maxStep &&
+        !this.blocksAt(result.x, result.z, sunk.box.topY, radius, height);
+      if (!canRiseOnto) {
+        const freed = this.escapePosition(result.x, result.y, result.z, radius, height, { x: dx, z: dz });
+        if (freed) {
+          result.x = freed.x;
+          result.z = freed.z;
+          result.escaped = true;
+        }
       }
       // Ring search only finds a free spot if it is a whole ring away. Contact with
       // a yawed corner can leave the body a centimetre inside a face, where every
@@ -368,8 +380,11 @@ export class CollisionWorld {
         result.grounded = true;
       } else {
         // Footprint, not center: a capsule that just stepped onto a ledge is
-        // still leaning on it with its edge while the center catches up.
-        const surface = this.footprintSurface(result.x, result.z, result.y, radius);
+        // still leaning on it with its edge while the center catches up. The snap
+        // spans a full step, so a disc overhanging a steppable ledge rests on its
+        // top instead of dropping to the ground below it and waking the depenetration
+        // against the ledge it can simply stand on.
+        const surface = this.footprintSurface(result.x, result.z, result.y, radius, maxStep);
         result.grounded = dy <= 0 && ny <= surface + EPSILON;
         result.y = result.grounded ? surface : ny;
       }

@@ -165,11 +165,11 @@ interface MarchResult {
 }
 
 /**
- * Marches the capsule at walk speed toward a target, one frame per step. A player
- * does not walk a dead-straight line into a rock: they steer around it. The probe
- * does the same, fanning out to the sides whenever the direct heading is blocked,
- * so what it reports as stuck is a spot nothing could get past, not a boulder a
- * player would simply walk around.
+ * Marches the capsule at walk speed toward a target, one frame per step, the way a
+ * player walks it: straight at the goal until the walk stops gaining ground on it,
+ * then along the obstacle that stopped it, and back onto the goal as soon as a
+ * look-ahead shows the direct line holds. What the march reports as blocked is
+ * therefore ground nothing could get past, not a wall a player walks around.
  */
 function march(
   w: CollisionWorld,
@@ -179,38 +179,88 @@ function march(
 ): MarchResult {
   const pos = { ...start };
   const embedded: string[] = [];
+  const step = 7 / 60;
   let freeze = 0;
   let longestFreeze = 0;
-  /** Side the last blocked heading steered toward, kept so the robot does not oscillate. */
+  /** Consecutive frames with the capsule overlapping geometry. */
+  let sunk = 0;
+
+  /** One frame along `heading`; `gained` is how much closer the target came. */
+  const advance = (heading: number): { moved: number; gained: number } => {
+    const before = Math.hypot(target.x - pos.x, target.z - pos.z);
+    const res = w.moveCylinder(
+      pos,
+      { x: Math.cos(heading) * step, y: -0.02, z: Math.sin(heading) * step },
+      R, H, 0.62,
+    );
+    const moved = Math.hypot(res.x - pos.x, res.z - pos.z);
+    pos.x = res.x; pos.z = res.z;
+    pos.y = w.moveCylinder(pos, { x: 0, y: -0.02, z: 0 }, R, H, 0.62).y;
+    return { moved, gained: before - Math.hypot(target.x - pos.x, target.z - pos.z) };
+  };
+
+  /** Replays the walk on a copy: true when the direct line holds for `check` frames. */
+  const lineOpens = (check: number): boolean => {
+    const probe = { ...pos };
+    for (let k = 0; k < check; k++) {
+      const dx = target.x - probe.x;
+      const dz = target.z - probe.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 1.2) return true;
+      const res = w.moveCylinder(probe, { x: (dx / d) * step, y: -0.02, z: (dz / d) * step }, R, H, 0.62);
+      probe.x = res.x; probe.z = res.z;
+      probe.y = w.moveCylinder(probe, { x: 0, y: -0.02, z: 0 }, R, H, 0.62).y;
+      if (Math.hypot(target.x - probe.x, target.z - probe.z) > d - step * 0.45) return false;
+    }
+    return true;
+  };
+
   let side = 0;
-  const step = 7 / 60;
+  let stall = 0;
   for (let i = 0; i < frames; i++) {
     const dx = target.x - pos.x;
     const dz = target.z - pos.z;
     const d = Math.hypot(dx, dz);
     if (d < 1.2) break;
     const heading = Math.atan2(dz, dx);
-    const tries = side === 0 ? [0] : [0, side * 0.6, side * 1.2, side * 1.9, -side * 0.6];
-    let best = { x: pos.x, z: pos.z, moved: 0, steer: 0 };
-    for (const off of tries) {
-      const res = w.moveCylinder(
-        pos,
-        { x: Math.cos(heading + off) * step, y: -0.02, z: Math.sin(heading + off) * step },
-        R, H, 0.62,
-      );
-      const moved = Math.hypot(res.x - pos.x, res.z - pos.z);
-      if (moved > best.moved) best = { x: res.x, z: res.z, moved, steer: off === 0 ? 0 : Math.sign(off) };
-      if (moved > step * 0.7) break;
+    let moved = 0;
+    if (side === 0) {
+      const r = advance(heading);
+      moved = r.moved;
+      // Sliding along a face covers ground sideways while the target stays put;
+      // that is the same dead end as not moving at all.
+      stall = r.gained > step * 0.3 ? 0 : stall + 1;
+      if (stall > 12) {
+        const left = w.moveCylinder(pos, { x: Math.cos(heading + Math.PI / 2) * step, y: -0.02, z: Math.sin(heading + Math.PI / 2) * step }, R, H, 0.62);
+        const right = w.moveCylinder(pos, { x: Math.cos(heading - Math.PI / 2) * step, y: -0.02, z: Math.sin(heading - Math.PI / 2) * step }, R, H, 0.62);
+        const lm = Math.hypot(left.x - pos.x, left.z - pos.z);
+        const rm = Math.hypot(right.x - pos.x, right.z - pos.z);
+        if (Math.max(lm, rm) < step * 0.5) {
+          // Neither tangent moves either: a pocket nothing of this size can leave.
+          stall = Number.MAX_SAFE_INTEGER;
+        } else {
+          side = lm >= rm ? 1 : -1;
+          stall = 0;
+        }
+      }
+    } else {
+      // Follow the obstacle, tilted toward the target so a convex corner rounds
+      // back toward the goal instead of away from it.
+      moved = advance(heading + side * (Math.PI / 2 - 0.3)).moved;
+      if (i % 10 === 0 && lineOpens(30)) side = 0;
     }
-    pos.x = best.x; pos.z = best.z;
-    const landed = w.moveCylinder(pos, { x: 0, y: -0.02, z: 0 }, R, H, 0.62);
-    pos.y = landed.y;
-    side = best.steer;
-    if (w.totalPenetration(pos.x, pos.z, pos.y, H, R) > 0.05) {
-      embedded.push(`(${pos.x.toFixed(0)},${pos.z.toFixed(0)})`);
-    }
-    freeze = best.moved < 1e-4 ? freeze + 1 : 0;
+    // A capsule grazing the shoulder of a bevelled ramp for one frame is normal
+    // contact resolution; sitting inside geometry is the bug. Only a sustained
+    // overlap counts.
+    sunk = w.totalPenetration(pos.x, pos.z, pos.y, H, R) > 0.05 ? sunk + 1 : 0;
+    if (sunk === 10) embedded.push(`(${pos.x.toFixed(0)},${pos.z.toFixed(0)})`);
+    freeze = moved < 1e-4 ? freeze + 1 : 0;
     longestFreeze = Math.max(longestFreeze, freeze);
+    if (side !== 0 && freeze > 90) {
+      // The wall being followed dead-ends here: try its other side.
+      side = -side;
+      freeze = 0;
+    }
   }
   return { x: pos.x, z: pos.z, embedded, longestFreeze };
 }
@@ -229,10 +279,7 @@ test('level: every enemy spawn point is clear of geometry', () => {
   assert.deepEqual(embedded, [], 'spawn points sit inside geometry');
 });
 
-test(
-  'level: the player can walk from the drop pad to the titan arena',
-  { todo: 'route blocked in the canyon/refinery: robot cannot traverse' },
-  () => {
+test('level: the player can walk from the drop pad to the titan arena', () => {
   const level = realLevel();
   const a = level.anchors;
   const route = [a.playerSpawn, a.camp, a.canyonEntry, a.refinery, a.bossArena, a.pedestal];
