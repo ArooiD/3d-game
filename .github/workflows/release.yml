@@ -1,0 +1,89 @@
+name: Desktop builds
+
+# Builds installable desktop packages for Windows, macOS and Linux.
+# - a push of a v* tag builds them and publishes a GitHub Release
+#   (electron-builder creates the release and uploads to it itself)
+# - manual runs and PRs touching packaging only upload workflow artifacts
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/make-icon.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      # Never try to reach a code-signing identity from CI.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GH_TOKEN: ${{ github.token }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows (NSIS + portable)
+            runner: windows-latest
+            args: --win --x64
+            artifact: desktop-windows
+          - label: macOS (DMG + zip)
+            runner: macos-latest
+            args: --mac --arm64 --x64
+            artifact: desktop-macos
+          - label: Linux (AppImage + deb)
+            runner: ubuntu-22.04
+            args: --linux AppImage deb --x64
+            artifact: desktop-linux
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate app icon
+        run: node scripts/make-icon.mjs
+
+      # --publish never keeps fork PRs and branch runs artifact-only; only a
+      # tag push (or an explicit choice from workflow_dispatch) can publish,
+      # because that is the only case where contents:write is meaningful.
+      - name: Build installers
+        run: npx electron-builder --publish ${{ github.ref_type == 'tag' && 'always' || 'never' }} ${{ matrix.args }}
+
+      - name: List built artifacts
+        shell: bash
+        run: ls -la release
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/latest*.yml
+          if-no-files-found: error
+          retention-days: 14
