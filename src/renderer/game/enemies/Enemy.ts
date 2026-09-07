@@ -8,6 +8,8 @@ import { rng } from '../core/Rng';
 import type { CollisionWorld } from '../physics/CollisionWorld';
 import type { EffectsSystem } from '../effects/EffectsSystem';
 import { rayCylinder, type DamageOptions, type TargetRegistry } from './TargetRegistry';
+import type { BuiltEnemy } from './EnemyModels';
+import type { EnemyAnimContext } from '../anim/EnemyAnimator';
 
 /**
  * Enemy entity: finite state machine + simple steering. States are exactly the
@@ -85,43 +87,29 @@ export class Enemy implements TargetRegistry {
   private impulse = new THREE.Vector3();
   private lastDamageFrom: 'player' | 'other' = 'other';
 
-  private rig: {
-    root: THREE.Group;
-    torso: THREE.Mesh;
-    head: THREE.Mesh;
-    legL: THREE.Mesh;
-    legR: THREE.Mesh;
-    armL: THREE.Mesh;
-    armR: THREE.Mesh;
-    visor: THREE.Mesh;
-    barrel: THREE.Mesh | null;
-    shieldRing: THREE.Mesh | null;
-  };
+  private rig: BuiltEnemy;
 
-  private disposables: () => void;
+  /** Animation bookkeeping, all in seconds and reset per event. */
+  private speed = 0;
+  private sinceShot = -1;
+  private sinceHit = -1;
+  private hitRegion: 0 | 1 = 0;
+  private hitSide = 0;
+  private swing = -1;
+  private swingDuration = 0;
+  private alertedClock = -1;
+  private deathClock = -1;
+  private lastFlash = -1;
 
   constructor(
     definition: EnemyDefinition,
     levelScale: number,
-    rig: {
-      root: THREE.Group;
-      torso: THREE.Mesh;
-      head: THREE.Mesh;
-      legL: THREE.Mesh;
-      legR: THREE.Mesh;
-      armL: THREE.Mesh;
-      armR: THREE.Mesh;
-      visor: THREE.Mesh;
-      barrel: THREE.Mesh | null;
-      shieldRing: THREE.Mesh | null;
-    },
-    disposables: () => void,
+    rig: BuiltEnemy,
   ) {
     this.id = `enemy_${nextEnemyId++}`;
     this.definition = definition;
     this.rig = rig;
-    this.disposables = disposables;
-    this.group.add(rig.root);
+    this.group.add(rig.skeleton.root);
     this.group.name = `enemy-${definition.id}`;
 
     this.maxHealth = Math.round(definition.health * levelScale);
@@ -219,6 +207,12 @@ export class Enemy implements TargetRegistry {
     if (remaining > 0) this.health -= remaining;
 
     this.hitFlash = 0.12;
+    this.sinceHit = 0;
+    this.hitRegion = options.headshot ? 1 : 0;
+    if (options.direction.lengthSq() > 0.01) {
+      const right = -options.direction.x * Math.cos(this.yaw) + options.direction.z * Math.sin(this.yaw);
+      this.hitSide = Math.max(-1, Math.min(1, right * 2));
+    }
     this.attackTimer = Math.max(0, this.attackTimer - 0.25);
 
     bus.emit(GameEvents.EnemyDamaged, {
@@ -259,7 +253,11 @@ export class Enemy implements TargetRegistry {
     this.health = 0;
     this.shield = 0;
     this.setVisualState();
-    this.group.rotation.x = 0;
+    this.group.rotation.set(0, 0, 0);
+    this.deathClock = 0;
+    this.swing = -1;
+    this.sinceShot = -1;
+    this.sinceHit = -1;
 
     if (!this.deathNotified) {
       this.deathNotified = true;
@@ -288,6 +286,8 @@ export class Enemy implements TargetRegistry {
   private becomeAlerted(): void {
     if (this.state === 'alert' || this.state === 'chase' || this.state === 'attack') return;
     this.setState('alert', 0.45);
+    this.alertedClock = 0;
+    this.rig.animator.syncPhase();
   }
 
   forceAggro(): void {
@@ -303,10 +303,13 @@ export class Enemy implements TargetRegistry {
 
   private setVisualState(): void {
     const tint = STATE_COLORS[this.state];
-    const visor = this.rig.visor.material as THREE.MeshLambertMaterial;
-    if (visor && visor.emissive) {
-      visor.emissive.setHex(this.state === 'dead' ? 0x000000 : tint === 0x000000 ? this.definition.accentHex : tint);
+    const lamp = this.rig.indicator;
+    if (this.state === 'dead') {
+      lamp.emissive.setHex(0x000000);
+      return;
     }
+    lamp.emissive.setHex(tint === 0x000000 ? this.definition.accentHex : tint);
+    lamp.emissive.multiplyScalar(this.state === 'idle' || this.state === 'patrol' ? 0.5 : 1);
   }
 
   // -------------------------------------------------------------- behaviour
@@ -316,18 +319,24 @@ export class Enemy implements TargetRegistry {
 
     if (!this.alive) {
       this.corpseTimer -= dt;
-      // Topple over and sink slightly.
-      const t = Math.max(0, Math.min(1, 1 - this.corpseTimer / 2.4));
-      this.group.rotation.x = -Math.PI * 0.42 * t;
-      this.group.position.y = this.position.y - t * 0.25;
+      this.deathClock = Math.min(1, this.deathClock + dt / (this.isBoss ? 1.6 : 0.85));
+      this.group.position.y = this.position.y;
+      this.playAnimation(dt, 0);
       return;
     }
 
     if (this.hitFlash > 0) {
       this.hitFlash -= dt;
       const flash = Math.max(0, this.hitFlash / 0.12);
-      const torso = this.rig.torso.material as THREE.MeshLambertMaterial;
-      if (torso && torso.emissive) torso.emissive.setRGB(flash, flash * 0.5, flash * 0.2);
+      // Body materials are per-instance, so only this enemy lights up.
+      for (const mesh of this.rig.flashable) {
+        (mesh.material as THREE.MeshLambertMaterial).emissive.setRGB(flash, flash * 0.45, flash * 0.2);
+      }
+    } else if (this.lastFlash !== -1) {
+      for (const mesh of this.rig.flashable) {
+        (mesh.material as THREE.MeshLambertMaterial).emissive.setRGB(0, 0, 0);
+      }
+      this.lastFlash = -1;
     }
 
     if (this.shieldRegenTimer > 0) {
@@ -417,7 +426,7 @@ export class Enemy implements TargetRegistry {
     // --- apply transform + animation --------------------------------------
     this.group.position.set(this.position.x, this.position.y, this.position.z);
     this.group.rotation.y = this.yaw;
-    this.animate(context.dt, flatDistance);
+    this.playAnimation(dt, flatDistance);
     void effects;
   }
 
@@ -430,6 +439,7 @@ export class Enemy implements TargetRegistry {
 
   private standStill(dt: number): void {
     this.bobPhase += dt * 2;
+    this.speed *= Math.max(0, 1 - dt * 12);
   }
 
   private faceTowards(x: number, z: number, dt: number, rate: number): void {
@@ -479,7 +489,9 @@ export class Enemy implements TargetRegistry {
       this.definition.height,
       0.7,
     );
+    const travelled = Math.hypot(result.x - this.position.x, result.z - this.position.z);
     this.position.set(result.x, result.y, result.z);
+    this.speed = travelled / Math.max(0.0001, dt);
     this.bobPhase += dt * (5 + speed);
     void context;
   }
@@ -570,7 +582,8 @@ export class Enemy implements TargetRegistry {
       if (distance <= this.definition.attackRange + 0.8) {
         this.attackTimer = this.definition.attackInterval;
         context.damagePlayer(this.damage, this.position);
-        this.rig.armR.rotation.x = -1.4;
+        this.swing = 0;
+        this.swingDuration = Math.min(0.55, this.definition.attackInterval * 0.6);
       } else {
         this.setState('chase');
       }
@@ -616,6 +629,7 @@ export class Enemy implements TargetRegistry {
       context.playerPosition.z - origin.z + rng.float(-1, 1) * spread * distance,
     ).normalize();
 
+    this.sinceShot = 0;
     const speed = this.definition.behavior === 'sniper' ? 130 : 62;
     context.shootAt(origin.clone(), dir.clone(), this.damage, speed);
     audio.playAt('weapon_shot_rifle', this.distanceTo(context.playerPosition), 70, 30);
@@ -672,6 +686,11 @@ export class Enemy implements TargetRegistry {
   }
 
   get muzzlePoint(): THREE.Vector3 {
+    // Read the animated muzzle anchor; fall back to the chest if detached.
+    if (this.rig.muzzle.parent) {
+      this.rig.muzzle.updateWorldMatrix(true, false);
+      return TEMP_MUZZLE.setFromMatrixPosition(this.rig.muzzle.matrixWorld);
+    }
     return TEMP_MUZZLE
       .set(this.position.x, this.eyeY - 0.1, this.position.z)
       .addScaledVector(TEMP_DIR.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)), this.definition.radius + 0.6);
@@ -679,42 +698,56 @@ export class Enemy implements TargetRegistry {
 
   // ---------------------------------------------------------------- visual
 
-  private animate(dt: number, distanceToPlayer: number): void {
-    const moving = this.state === 'chase' || this.state === 'patrol' || this.state === 'retreat' || this.state === 'attack';
-    const speedFactor = moving ? 1 : 0;
-    this.bobPhase += dt * 2 * speedFactor;
-    const swing = Math.sin(this.bobPhase * 2.2) * 0.55 * speedFactor;
-    this.rig.legL.rotation.x = swing;
-    this.rig.legR.rotation.x = -swing;
-    if (this.state !== 'attack' || this.definition.behavior === 'rusher') {
-      this.rig.armL.rotation.x = -swing * 0.6;
+  private playAnimation(dt: number, _distance: number): void {
+    const melee = this.definition.behavior === 'rusher';
+    if (this.sinceShot >= 0) this.sinceShot += dt;
+    if (this.sinceHit >= 0) this.sinceHit += dt;
+    if (this.alertedClock >= 0) {
+      this.alertedClock += dt / 0.45;
+      if (this.alertedClock > 1) this.alertedClock = -1;
     }
-    this.rig.armR.rotation.x = THREE.MathUtils.lerp(this.rig.armR.rotation.x, this.state === 'attack' ? -1.45 : -swing * 0.6, Math.min(1, dt * 8));
+    if (this.swing >= 0) {
+      this.swing += dt / Math.max(0.12, this.swingDuration);
+      if (this.swing > 1) this.swing = -1;
+    }
 
-    const idleBreath = Math.sin(this.bobPhase) * 0.02;
-    this.rig.torso.position.y = (this.isBoss ? 3.6 : 1.25) + idleBreath;
+    const context: EnemyAnimContext = {
+      dt,
+      speed: this.speed,
+      moveSpeed: this.moveSpeed,
+      state: this.state,
+      sinceShot: this.sinceShot,
+      sinceHit: this.sinceHit,
+      hitRegion: this.hitRegion,
+      hitSide: this.hitSide,
+      swing: this.swing,
+      melee,
+      aiming: this.state === 'attack' && !melee,
+      crouched: this.definition.behavior === 'sniper' && this.state === 'attack',
+      braced: this.definition.behavior === 'heavy' && this.state === 'attack',
+      alerted: this.alertedClock,
+      boss: this.isBoss,
+      death: this.alive ? -1 : this.deathClock,
+    };
+    this.rig.animator.update(context);
 
-    if (this.rig.shieldRing) {
-      this.rig.shieldRing.rotation.z += dt * 1.1;
-      const active = this.shield > 0.5;
-      this.rig.shieldRing.visible = active;
+    const ring = this.rig.shieldRing;
+    if (ring) {
+      ring.rotation.z += dt * 1.1;
+      const active = this.shield > 0.5 && this.alive;
+      ring.visible = active;
       if (active) {
-        const mat = this.rig.shieldRing.material as THREE.MeshLambertMaterial;
-        mat.opacity = 0.35 + 0.35 * (this.shield / Math.max(1, this.maxShield));
-        mat.transparent = true;
+        const material = ring.material as THREE.MeshLambertMaterial;
+        material.transparent = true;
+        material.opacity = 0.25 + 0.35 * (this.shield / Math.max(1, this.maxShield));
       }
     }
-
-    // Elites and the boss get a subtle bob so they read as bigger threats.
-    if (this.isBoss) {
-      this.group.position.y = this.position.y + Math.sin(this.bobPhase * 0.8) * 0.08;
-    }
-    void distanceToPlayer;
+    void _distance;
   }
 
   detach(): void {
     this.group.parent?.remove(this.group);
-    this.disposables();
+    this.rig.dispose();
   }
 
   get healthRatio(): number {

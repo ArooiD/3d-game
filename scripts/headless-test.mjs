@@ -592,6 +592,115 @@ async function run() {
     check('combat: killing an enemy awards XP', Number(killOutcome.xp) > Number(xpBefore),
       `xp ${xpBefore} -> ${killOutcome.xp}, dead=${killOutcome.dead}`);
 
+    // ---- performance: measure the cost of the animated rigs ----------------
+    const perf = await client.evaluate(`
+      const g = window.__game;
+      const origin = g.controller.position.clone();
+      const ids = ['raider', 'rusher', 'heavy', 'sniper'];
+      for (let i = 0; i < 20; i += 1) {
+        g.enemies.spawn(
+          { definitionId: ids[i % ids.length], x: origin.x + (i % 5) * 3, y: origin.y, z: origin.z - 12 - Math.floor(i / 5) * 3 },
+          g.player.level,
+        );
+      }
+      const alive = g.enemies.enemies.filter((e) => e.alive).length;
+      let meshes = 0;
+      let bones = 0;
+      for (const enemy of g.enemies.enemies) {
+        if (!enemy.alive) continue;
+        meshes += enemy.rig.meshes.length;
+        bones += enemy.rig.skeleton.bones.size;
+      }
+      return { alive, meshes, bones, calls: g.renderer.info.render.calls, tris: g.renderer.info.render.triangles };
+    `);
+    check('performance: rig cost stays bounded with 20+ enemies',
+      Boolean(perf) && perf.alive >= 20 && perf.calls < 3000,
+      JSON.stringify(perf));
+
+
+    // ---- animation layer: every archetype must pose without breaking -------
+    await client.evaluate(`
+      const g = window.__game;
+      const origin = g.controller.position.clone();
+      const ids = ['raider', 'rusher', 'heavy', 'sniper', 'scrap_titan'];
+      ids.forEach((definitionId, i) => {
+        g.enemies.spawn(
+          { definitionId, x: origin.x + 3 + i * 2.5, y: origin.y, z: origin.z - 7 },
+          g.player.level,
+        );
+      });
+      return true;
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const posed = await client.evaluate(`
+      const g = window.__game;
+      const Vec = g.controller.position.constructor;
+      const read = (enemy) => {
+        let moved = 0;
+        let bad = 0;
+        enemy.rig.skeleton.bones.forEach((bone) => {
+          const e = bone.rotation;
+          if (!Number.isFinite(e.x) || !Number.isFinite(e.y) || !Number.isFinite(e.z)) bad += 1;
+          const world = bone.getWorldPosition(new Vec());
+          if (!Number.isFinite(world.y)) bad += 1;
+          if (Math.abs(e.x) + Math.abs(e.y) + Math.abs(e.z) > 0.05) moved += 1;
+        });
+        return { moved, bad };
+      };
+      return g.enemies.enemies.filter((enemy) => enemy.alive).slice(0, 6).map((enemy) => {
+        enemy.forceAggro();
+        enemy.state = 'attack';
+        enemy.sinceShot = 0;
+        enemy.sinceHit = 0;
+        return { id: enemy.definition.id, pose: read(enemy) };
+      });
+    `);
+    const allPosed = Array.isArray(posed) && posed.length >= 4
+      && posed.every((entry) => entry.pose.moved >= 8 && entry.pose.bad === 0);
+    check('animation: rigs pose on every archetype with finite bones', allPosed,
+      JSON.stringify((posed || []).map((entry) => entry.id + ':' + entry.pose.moved + '/bad' + entry.pose.bad)));
+
+    const beforeDeath = await client.evaluate(`
+      const g = window.__game;
+      const Vec = g.controller.position.constructor;
+      const victim = g.enemies.enemies.find((enemy) => enemy.alive && enemy.definition.id !== 'scrap_titan');
+      if (!victim) return null;
+      const hipsBefore = victim.group.position.y;
+      victim.applyDamage(victim.maxHealth + victim.shield + 500, {
+        headshot: false, critical: false, shieldBonus: 0, fromPlayer: true,
+        direction: new Vec(0, 1, 0),
+      });
+      return { hipsBefore };
+    `, cap(6000));
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const fallen = await client.evaluate(`
+      const g = window.__game;
+      const Vec = g.controller.position.constructor;
+      const corpses = g.enemies.enemies.filter((enemy) => !enemy.alive);
+      if (!corpses.length) return null;
+      let best = null;
+      for (const corpse of corpses) {
+        let lowest = Infinity;
+        let bad = 0;
+        let moved = 0;
+        corpse.rig.skeleton.bones.forEach((bone) => {
+          const world = bone.getWorldPosition(new Vec());
+          if (!Number.isFinite(world.y)) bad += 1;
+          if (world.y < lowest) lowest = world.y;
+          const e = bone.rotation;
+          if (Math.abs(e.x) + Math.abs(e.y) + Math.abs(e.z) > 0.05) moved += 1;
+        });
+        if (!best || lowest < best.lowest) best = { lowest, bad, moved };
+      }
+      return best;
+    `, cap(6000));
+    check('animation: death collapses the rig without NaN bones',
+      Boolean(beforeDeath) && Boolean(fallen) && fallen.bad === 0
+      && fallen.moved >= 8 && fallen.lowest < beforeDeath.hipsBefore,
+      'hips ' + (beforeDeath ? beforeDeath.hipsBefore.toFixed(2) : 'n/a')
+      + ' -> lowest ' + (fallen ? fallen.lowest.toFixed(2) : 'n/a')
+      + ', bones moved=' + (fallen ? fallen.moved : 'n/a'));
+
     // ---- enough XP raises the level and grants a skill point ----------------
     const leveled = await client.waitFor('the player to reach level 2', `
       const g = window.__game;

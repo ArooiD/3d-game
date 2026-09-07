@@ -116,7 +116,7 @@ export class EnemyManager {
 
     const scale = scaleForLevel(playerLevel);
     const built = this.factory.create(definition);
-    const enemy = new Enemy(definition, scale, built.rig, built.dispose);
+    const enemy = new Enemy(definition, scale, built);
     const y = request.y ?? this.groundY(request.x, request.z);
     enemy.place(request.x, y, request.z);
     enemy.bossMinion = Boolean(request.bossMinion);
@@ -128,7 +128,7 @@ export class EnemyManager {
       enemy.damage *= 1.15;
     }
     if (definition.behavior === 'sniper') {
-      built.rig.barrel?.scale.set(1, 1, 1.5);
+      built.barrel?.scale.set(1, 1, 1.5);
     }
 
     this.scene.add(enemy.group);

@@ -1,122 +1,376 @@
 import * as THREE from 'three';
-import type { EnemyDefinition } from '../../../shared/types';
+import type { EnemyBehavior, EnemyDefinition } from '../../../shared/types';
 import { MAX_ENEMY_LEVEL_SCALE } from '../../data/enemies/enemies';
 import { enemyLevelScale } from '../../../shared/constants';
+import { Skeleton, type BoneName } from '../anim/Rig';
+import { EnemyAnimator } from '../anim/EnemyAnimator';
 
 /**
- * Low-poly enemy bodies built from primitives, plus pooled health bars.
- * One shared geometry set per behaviour keeps draw calls and memory flat no
- * matter how many enemies are alive.
+ * Procedural enemy bodies: a segmented skeleton with rigid low-poly shells
+ * parented to the bones, so the animation layer can drive real joints instead of
+ * rotating whole meshes.
+ *
+ * Geometry is one shared unit box (plus a cylinder and a torus) scaled per part,
+ * and materials are cached per definition, so N enemies of a type add no buffers
+ * and no new materials.
  */
 
-interface RigParts {
-  root: THREE.Group;
-  torso: THREE.Mesh;
-  head: THREE.Mesh;
-  legL: THREE.Mesh;
-  legR: THREE.Mesh;
-  armL: THREE.Mesh;
-  armR: THREE.Mesh;
-  visor: THREE.Mesh;
-  barrel: THREE.Mesh | null;
-  shieldRing: THREE.Mesh | null;
+interface Proportions {
+  hipHeight: number;
+  torsoHeight: number;
+  torsoWidth: number;
+  torsoDepth: number;
+  shoulderWidth: number;
+  upperArm: number;
+  forearm: number;
+  limbThickness: number;
+  thigh: number;
+  shin: number;
+  legThickness: number;
+  headSize: number;
+  /** Forward lean baked into the bind pose, in degrees. */
+  hunch: number;
+  neckLength: number;
 }
 
-const shared = {
-  torso: new THREE.BoxGeometry(0.82, 1.0, 0.5),
-  head: new THREE.BoxGeometry(0.46, 0.44, 0.46),
-  visor: new THREE.BoxGeometry(0.4, 0.12, 0.06),
-  leg: new THREE.BoxGeometry(0.24, 0.8, 0.24),
-  arm: new THREE.BoxGeometry(0.2, 0.72, 0.2),
-  barrel: new THREE.BoxGeometry(0.14, 0.14, 0.9),
-  pack: new THREE.BoxGeometry(0.5, 0.55, 0.3),
-  shoulder: new THREE.BoxGeometry(0.3, 0.28, 0.42),
-  ring: new THREE.TorusGeometry(0.95, 0.07, 6, 18),
-  bossTorso: new THREE.BoxGeometry(3.2, 3.0, 2.2),
-  bossHead: new THREE.BoxGeometry(1.3, 1.1, 1.2),
-  bossArm: new THREE.BoxGeometry(0.9, 2.4, 0.9),
-  bossLeg: new THREE.BoxGeometry(1.1, 2.2, 1.1),
-  bossCannon: new THREE.CylinderGeometry(0.42, 0.5, 2.8, 8),
-  bossMissile: new THREE.BoxGeometry(1.2, 0.9, 1.6),
-  bossPlate: new THREE.BoxGeometry(3.6, 0.5, 2.6),
+const PROPORTIONS: Record<EnemyBehavior, Proportions> = {
+  raider: {
+    hipHeight: 0.5, torsoHeight: 0.62, torsoWidth: 0.52, torsoDepth: 0.32,
+    shoulderWidth: 0.62, upperArm: 0.3, forearm: 0.28, limbThickness: 0.13,
+    thigh: 0.46, shin: 0.44, legThickness: 0.17, headSize: 0.3, hunch: 6, neckLength: 0.08,
+  },
+  rusher: {
+    hipHeight: 0.46, torsoHeight: 0.5, torsoWidth: 0.46, torsoDepth: 0.3,
+    shoulderWidth: 0.66, upperArm: 0.34, forearm: 0.34, limbThickness: 0.12,
+    thigh: 0.4, shin: 0.42, legThickness: 0.15, headSize: 0.26, hunch: 22, neckLength: 0.05,
+  },
+  heavy: {
+    hipHeight: 0.46, torsoHeight: 0.72, torsoWidth: 0.86, torsoDepth: 0.5,
+    shoulderWidth: 1.05, upperArm: 0.34, forearm: 0.3, limbThickness: 0.24,
+    thigh: 0.4, shin: 0.38, legThickness: 0.28, headSize: 0.3, hunch: 4, neckLength: 0.02,
+  },
+  sniper: {
+    hipHeight: 0.53, torsoHeight: 0.6, torsoWidth: 0.46, torsoDepth: 0.28,
+    shoulderWidth: 0.56, upperArm: 0.32, forearm: 0.32, limbThickness: 0.11,
+    thigh: 0.5, shin: 0.48, legThickness: 0.14, headSize: 0.28, hunch: 3, neckLength: 0.1,
+  },
+  boss: {
+    hipHeight: 0.44, torsoHeight: 0.5, torsoWidth: 0.78, torsoDepth: 0.56,
+    shoulderWidth: 1.5, upperArm: 0.4, forearm: 0.36, limbThickness: 0.3,
+    thigh: 0.44, shin: 0.42, legThickness: 0.36, headSize: 0.26, hunch: 10, neckLength: 0.04,
+  },
 };
 
+const unit = new THREE.BoxGeometry(1, 1, 1);
+const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
+const ring = new THREE.TorusGeometry(1, 0.06, 6, 20);
+
+export interface BuiltEnemy {
+  skeleton: Skeleton;
+  animator: EnemyAnimator;
+  meshes: THREE.Mesh[];
+  /** Shells that flash when the enemy is hit. */
+  flashable: THREE.Mesh[];
+  head: THREE.Mesh;
+  /** Visor lamp: per-instance material used for state + hit feedback. */
+  indicator: THREE.MeshLambertMaterial;
+  barrel: THREE.Mesh | null;
+  shieldRing: THREE.Mesh | null;
+  /** Local-space muzzle anchor parented to the weapon arm. */
+  muzzle: THREE.Object3D;
+  dispose: () => void;
+}
+
 export class EnemyFactory {
-  private materialCache = new Map<string, THREE.MeshLambertMaterial>();
+  private materials = new Map<string, THREE.MeshLambertMaterial>();
 
-  create(def: EnemyDefinition): { rig: RigParts; meshes: THREE.Mesh[]; dispose: () => void } {
-    const isBoss = def.behavior === 'boss';
-    const body = this.material(`body-${def.id}`, def.colorHex, def);
-    const accent = this.material(`accent-${def.id}`, def.accentHex, def, true);
-    const dark = this.material('dark', 0x2b2f38, def);
+  create(def: EnemyDefinition): BuiltEnemy {
+    const p = PROPORTIONS[def.behavior] ?? PROPORTIONS.raider;
+    const height = def.height;
+    // Per-instance materials for anything that flashes on hit; shared ones are
+    // cached per definition and never tinted.
+    const body = new THREE.MeshLambertMaterial({ color: def.colorHex, flatShading: true });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x2b2f38, flatShading: true });
+    const accent = this.material('accent', def.accentHex, def, true);
+    const trim = this.material('trim', 0x1b1e24, def);
+
+    const skeleton = new Skeleton(`enemy-${def.id}`);
     const meshes: THREE.Mesh[] = [];
-    const root = new THREE.Group();
-    root.name = `enemy-${def.id}`;
+    const flashable: THREE.Mesh[] = [];
 
-    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number): THREE.Mesh => {
-      const mesh = new THREE.Mesh(geo, mat);
+    /** Box shell sized in metres, hung off a bone. */
+    const shell = (
+      parent: THREE.Object3D,
+      w: number,
+      h: number,
+      d: number,
+      x: number,
+      y: number,
+      z: number,
+      material: THREE.Material,
+      flash = true,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(unit, material);
+      mesh.scale.set(w, h, d);
       mesh.position.set(x, y, z);
-      root.add(mesh);
+      parent.add(mesh);
       meshes.push(mesh);
+      if (flash && (material === body || material === dark)) flashable.push(mesh);
       return mesh;
     };
 
-    if (isBoss) {
-      const torso = mk(shared.bossTorso, body, 0, 3.6, 0);
-      const head = mk(shared.bossHead, dark, 0, 5.5, 0.2);
-      mk(shared.visor, accent, 0, 5.55, 0.83);
-      mk(shared.bossPlate, dark, 0, 4.6, 0);
-      const legL = mk(shared.bossLeg, dark, -0.95, 1.1, 0);
-      const legR = mk(shared.bossLeg, dark, 0.95, 1.1, 0);
-      const armL = mk(shared.bossArm, body, -2.2, 3.7, 0);
-      const armR = mk(shared.bossArm, body, 2.2, 3.7, 0);
-      const barrel = mk(shared.bossCannon, dark, -2.2, 3.4, 1.6);
-      barrel.rotation.x = Math.PI / 2;
-      mk(shared.bossMissile, accent, 2.2, 4.6, 0.4);
-      const shieldRing = mk(shared.ring, accent, 0, 3.6, 0);
-      shieldRing.rotation.x = Math.PI / 2;
-      shieldRing.scale.setScalar(1.9);
-      return {
-        rig: { root, torso, head, legL, legR, armL, armR, visor: head, barrel, shieldRing },
-        meshes,
-        dispose: () => this.releaseMeshes(meshes),
-      };
+    const tube = (
+      parent: THREE.Object3D,
+      radius: number,
+      length: number,
+      x: number,
+      y: number,
+      z: number,
+      material: THREE.Material,
+      flash = true,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(cylinder, material);
+      mesh.scale.set(radius * 2, length, radius * 2);
+      mesh.position.set(x, y, z);
+      parent.add(mesh);
+      meshes.push(mesh);
+      if (flash && (material === body || material === dark)) flashable.push(mesh);
+      return mesh;
+    };
+
+    // ------------------------------------------------------------ skeleton
+    const hips = skeleton.bone('hips', null, 0, height * p.hipHeight, 0);
+    const spine = skeleton.bone('spine', hips, 0, height * 0.1, 0);
+    const chest = skeleton.bone('chest', spine, 0, height * p.torsoHeight * 0.55, 0);
+    const neck = skeleton.bone('neck', chest, 0, height * p.torsoHeight * 0.42, 0);
+    const head = skeleton.bone('head', neck, 0, height * p.neckLength, 0);
+
+    skeleton.setBind('hips', p.hunch * 0.25);
+    skeleton.setBind('spine', p.hunch * 0.45);
+    skeleton.setBind('chest', p.hunch * 0.3);
+    skeleton.setBind('neck', -p.hunch * 0.5);
+    const flatBones: BoneName[] = ['head', 'shoulderL', 'shoulderR', 'armL', 'armR', 'forearmL', 'forearmR'];
+    for (const name of flatBones) skeleton.setBind(name);
+
+    const shoulderY = height * p.torsoHeight * 0.42;
+    const armHang = def.behavior === 'rusher' ? -6 : -2;
+    for (const side of [-1, 1] as const) {
+      const tag = side < 0 ? 'L' : 'R';
+      skeleton.bone(`shoulder${tag}`, chest, side * p.shoulderWidth * 0.5, shoulderY, 0);
+      skeleton.setBind(`shoulder${tag}`, 0, 0, side * 4);
+      skeleton.bone(`arm${tag}`, skeleton.bones.get(`shoulder${tag}`)!, 0, -height * 0.02, 0);
+      skeleton.setBind(`arm${tag}`, armHang, 0, side * 6);
+      skeleton.bone(`forearm${tag}`, skeleton.bones.get(`arm${tag}`)!, 0, -height * p.upperArm, 0);
+      skeleton.setBind(`forearm${tag}`, def.behavior === 'rusher' ? -18 : -12);
+
+      skeleton.bone(`thigh${tag}`, hips, side * p.torsoWidth * 0.28, -height * 0.02, 0);
+      skeleton.setBind(`thigh${tag}`, 0, 0, side * 2);
+      skeleton.bone(`shin${tag}`, skeleton.bones.get(`thigh${tag}`)!, 0, -height * p.thigh, 0);
+      skeleton.setBind(`shin${tag}`, 3);
+      skeleton.bone(`foot${tag}`, skeleton.bones.get(`shin${tag}`)!, 0, -height * p.shin, 0);
+      skeleton.setBind(`foot${tag}`, -3);
     }
 
-    const scale = def.height / 1.8;
-    const torso = mk(shared.torso, body, 0, 1.25 * scale, 0);
-    const head = mk(shared.head, dark, 0, 1.98 * scale, 0);
-    const visor = mk(shared.visor, accent, 0, 2.0 * scale, 0.24);
-    const legL = mk(shared.leg, dark, -0.2 * scale, 0.42 * scale, 0);
-    const legR = mk(shared.leg, dark, 0.2 * scale, 0.42 * scale, 0);
-    const armL = mk(shared.arm, body, -0.55 * scale, 1.28 * scale, 0);
-    const armR = mk(shared.arm, body, 0.55 * scale, 1.28 * scale, 0);
-    mk(shared.pack, dark, 0, 1.35 * scale, -0.4 * scale);
+    // --------------------------------------------------------------- shells
+    const torsoW = p.torsoWidth * height;
+    const torsoH = p.torsoHeight * height;
+    const torsoD = p.torsoDepth * height;
+    const limb = p.limbThickness * height;
+    const leg = p.legThickness * height;
+
+    shell(hips, torsoW * 0.92, torsoH * 0.3, torsoD * 0.9, 0, torsoH * 0.02, 0, dark);
+    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 0.95, 0, torsoH * 0.22, 0, body);
+    shell(chest, torsoW, torsoH * 0.52, torsoD, 0, torsoH * 0.16, 0, body);
+    shell(chest, torsoW * 0.72, torsoH * 0.22, torsoD * 0.42, 0, torsoH * 0.34, -torsoD * 0.55, trim);
+
+    const headSize = p.headSize * height;
+    const headShell = shell(head, headSize, headSize * 0.92, headSize, 0, headSize * 0.44, 0, dark);
+    // The visor owns a per-instance material: it is the state/headshot lamp.
+    const indicatorMaterial = (accent as THREE.MeshLambertMaterial).clone();
+    const indicatorShell = new THREE.Mesh(unit, indicatorMaterial);
+    indicatorShell.scale.set(headSize * 0.86, headSize * 0.2, headSize * 0.14);
+    indicatorShell.position.set(0, headSize * 0.5, -headSize * 0.48);
+    head.add(indicatorShell);
+    meshes.push(indicatorShell);
+    shell(head, headSize * 0.7, headSize * 0.22, headSize * 0.3, 0, headSize * 0.18, -headSize * 0.3, trim, false);
+
+    for (const side of [-1, 1] as const) {
+      const tag = side < 0 ? 'L' : 'R';
+      const shoulderBone = skeleton.bones.get(`shoulder${tag}`)!;
+      const armBone = skeleton.bones.get(`arm${tag}`)!;
+      const forearmBone = skeleton.bones.get(`forearm${tag}`)!;
+      const thighBone = skeleton.bones.get(`thigh${tag}`)!;
+      const shinBone = skeleton.bones.get(`shin${tag}`)!;
+      const footBone = skeleton.bones.get(`foot${tag}`)!;
+
+      shell(shoulderBone, limb * 1.5, limb * 1.2, limb * 1.5, 0, limb * 0.4, 0, body);
+      shell(armBone, limb, p.upperArm * height, limb, 0, -p.upperArm * height * 0.5, 0, body);
+      shell(forearmBone, limb * 0.9, p.forearm * height, limb * 0.9, 0, -p.forearm * height * 0.5, 0, dark);
+      shell(forearmBone, limb * 1.1, limb * 0.7, limb * 1.1, 0, -p.forearm * height * 0.94, 0, trim, false);
+
+      shell(thighBone, leg, p.thigh * height, leg, 0, -p.thigh * height * 0.5, 0, dark);
+      shell(shinBone, leg * 0.88, p.shin * height, leg * 0.88, 0, -p.shin * height * 0.5, 0, dark);
+      // Boot, wider and pushed forward so the stance reads from the side.
+      shell(footBone, leg * 1.05, leg * 0.45, leg * 1.9, 0, -leg * 0.18, -leg * 0.4, trim);
+    }
+
+    // ------------------------------------------------------- archetype props
+    let barrel: THREE.Mesh | null = null;
+    let shieldRing: THREE.Mesh | null = null;
+    const muzzle = new THREE.Object3D();
+    muzzle.name = 'muzzle';
+    const forearmLength = p.forearm * height;
+
+    if (def.behavior === 'raider' || def.behavior === 'sniper' || def.behavior === 'heavy') {
+      const gunRoot = skeleton.bones.get('forearmR')!;
+      const gunLength = def.behavior === 'sniper' ? height * 1.15 : def.behavior === 'heavy' ? height * 0.72 : height * 0.55;
+      const gunBody = def.behavior === 'heavy' ? limb * 1.5 : limb * 0.7;
+      shell(gunRoot, gunBody, gunBody * 0.8, gunLength * 0.6, 0, -forearmLength * 0.98, -gunLength * 0.2, trim);
+      barrel = shell(gunRoot, gunBody * 0.45, gunBody * 0.45, gunLength, 0, -forearmLength * 0.98, -gunLength * 0.62, dark, false);
+      if (def.behavior === 'sniper') {
+        shell(gunRoot, gunBody * 0.5, gunBody * 0.5, gunLength * 0.34, 0, -forearmLength * 0.98 + gunBody * 0.8, -gunLength * 0.45, accent, false);
+      }
+      if (def.behavior === 'heavy') {
+        tube(gunRoot, gunBody * 0.42, gunLength * 0.5, gunBody * 0.5, -forearmLength * 0.98, -gunLength * 0.55, dark, false);
+        tube(gunRoot, gunBody * 0.42, gunLength * 0.5, -gunBody * 0.5, -forearmLength * 0.98, -gunLength * 0.55, dark, false);
+      }
+      // Support hand resting on the foregrip.
+      shell(skeleton.bones.get('forearmL')!, limb * 1.1, limb, limb * 1.1, 0, -forearmLength * 0.9, -gunLength * 0.3, trim, false);
+      muzzle.position.set(0, -forearmLength * 0.98, -gunLength * 1.12);
+      gunRoot.add(muzzle);
+    }
+
+    if (def.behavior === 'rusher') {
+      for (const side of [-1, 1] as const) {
+        const tag = side < 0 ? 'L' : 'R';
+        const shoulderBone = skeleton.bones.get(`shoulder${tag}`)!;
+        const forearmBone = skeleton.bones.get(`forearm${tag}`)!;
+        const spike = shell(shoulderBone, limb * 0.5, limb * 1.5, limb * 0.5, side * p.shoulderWidth * height * 0.16, limb * 0.9, 0, accent, false);
+        spike.rotation.z = side * 0.5;
+        for (let i = 0; i < 3; i++) {
+          const claw = shell(forearmBone, limb * 0.22, limb * 1.5, limb * 0.22, (i - 1) * limb * 0.5, -forearmLength * 1.35, -limb * 0.35, dark, false);
+          claw.rotation.x = -0.45;
+        }
+      }
+      shell(chest, torsoW * 0.5, torsoH * 0.3, torsoD * 0.3, 0, torsoH * 0.1, torsoD * 0.52, accent, false);
+      muzzle.position.set(0, -forearmLength * 1.2, -limb * 1.5);
+      skeleton.bones.get('forearmR')!.add(muzzle);
+    }
 
     if (def.behavior === 'heavy') {
-      mk(shared.shoulder, accent, -0.62 * scale, 1.72 * scale, 0);
-      mk(shared.shoulder, accent, 0.62 * scale, 1.72 * scale, 0);
+      shell(chest, torsoW * 1.16, torsoH * 0.42, torsoD * 1.14, 0, torsoH * 0.2, 0, accent, false);
+      for (const side of [-1, 1] as const) {
+        const shoulderBone = skeleton.bones.get(side < 0 ? 'shoulderL' : 'shoulderR')!;
+        shell(shoulderBone, limb * 2.5, limb * 1.5, limb * 2.2, 0, limb * 0.5, 0, body);
+      }
+      shell(spine, torsoW * 0.7, torsoH * 0.6, torsoD * 0.55, 0, torsoH * 0.1, torsoD * 0.62, trim, false);
+      tube(spine, torsoW * 0.22, torsoH * 0.5, 0, torsoH * 0.1, torsoD * 0.62, accent, false);
     }
 
-    let barrel: THREE.Mesh | null = null;
-    if (def.behavior === 'raider' || def.behavior === 'sniper' || def.behavior === 'heavy') {
-      barrel = mk(def.behavior === 'sniper' ? shared.bossCannon : shared.barrel, dark, 0.55 * scale, 1.3 * scale, 0.55);
-      if (def.behavior === 'sniper') barrel.rotation.x = Math.PI / 2;
+    if (def.behavior === 'sniper') {
+      shell(spine, torsoW * 0.6, torsoH * 0.22, torsoD * 0.5, 0, torsoH * 0.02, torsoD * 0.6, trim, false);
+      const antenna = tube(chest, height * 0.008, height * 0.5, p.shoulderWidth * height * 0.3, height * 0.24, torsoD * 0.2, dark, false);
+      antenna.rotation.z = -0.2;
     }
 
-    let shieldRing: THREE.Mesh | null = null;
+    if (def.behavior === 'raider') {
+      shell(hips, torsoW * 0.4, torsoH * 0.2, torsoD * 0.5, -torsoW * 0.4, -torsoH * 0.02, 0, trim, false);
+      shell(spine, torsoW * 0.62, torsoH * 0.44, torsoD * 0.4, 0, torsoH * 0.16, torsoD * 0.6, trim, false);
+    }
+
+    if (def.behavior === 'boss') {
+      // Scrap Titan: welded plate stack, rotary cannon, missile rack.
+      shell(chest, torsoW * 1.1, torsoH * 0.55, torsoD, 0, torsoH * 0.2, 0, body);
+      for (let i = 0; i < 3; i++) {
+        shell(chest, torsoW * (1.12 - i * 0.08), torsoH * 0.1, torsoD * 1.12, 0, torsoH * (0.32 - i * 0.16), -torsoD * 0.06, dark, false);
+      }
+      shell(spine, torsoW * 0.9, torsoH * 0.5, torsoD * 0.9, 0, torsoH * 0.16, 0, trim);
+      for (const side of [-1, 1] as const) {
+        const stack = tube(spine, height * 0.05, height * 0.34, side * torsoW * 0.3, torsoH * 0.34, torsoD * 0.6, dark, false);
+        stack.rotation.x = 0.25;
+      }
+      shell(spine, torsoW * 0.3, torsoH * 0.26, torsoD * 0.24, 0, torsoH * 0.18, torsoD * 0.56, accent, false);
+      for (const side of [-1, 1] as const) {
+        const shoulderBone = skeleton.bones.get(side < 0 ? 'shoulderL' : 'shoulderR')!;
+        shell(shoulderBone, limb * 2.6, limb * 1.9, limb * 2.4, 0, limb * 0.6, 0, body);
+        shell(shoulderBone, limb * 2.7, limb * 0.3, limb * 2.5, 0, limb * 0.1, 0, accent, false);
+      }
+      const armR = skeleton.bones.get('forearmR')!;
+      const cannon = tube(armR, limb * 0.6, height * 0.5, 0, -forearmLength, -height * 0.16, dark, false);
+      cannon.rotation.x = Math.PI / 2;
+      for (let i = 0; i < 4; i++) {
+        const barrelMesh = tube(
+          armR,
+          limb * 0.16,
+          height * 0.42,
+          Math.cos((i / 4) * Math.PI * 2) * limb * 0.3,
+          -forearmLength,
+          -height * 0.42,
+          trim,
+          false,
+        );
+        barrelMesh.rotation.x = Math.PI / 2;
+      }
+      muzzle.position.set(0, -forearmLength, -height * 0.66);
+      armR.add(muzzle);
+      const armL = skeleton.bones.get('forearmL')!;
+      shell(armL, limb * 2, limb * 1.6, limb * 2.4, 0, -forearmLength, -limb, dark, false);
+      for (let i = 0; i < 4; i++) {
+        const pod = tube(
+          armL,
+          limb * 0.3,
+          limb * 1.4,
+          ((i % 2) - 0.5) * limb * 0.9,
+          -forearmLength + (i < 2 ? limb * 0.45 : -limb * 0.45),
+          -limb * 2,
+          accent,
+          false,
+        );
+        pod.rotation.x = Math.PI / 2;
+      }
+      for (const side of [-1, 1] as const) {
+        const shinBone = skeleton.bones.get(side < 0 ? 'shinL' : 'shinR')!;
+        shell(shinBone, leg * 1.25, p.shin * height * 0.7, leg * 1.3, 0, -p.shin * height * 0.45, -leg * 0.12, body, false);
+      }
+      shell(head, headSize * 1.3, headSize * 0.7, headSize, 0, headSize * 0.4, 0, trim, false);
+    }
+
+    if (def.isElite) {
+      // Crown so players can pick the reward target out of a crowd.
+      shell(head, headSize * 1.2, headSize * 0.14, headSize * 1.2, 0, headSize * 0.86, 0, accent, false);
+    }
+
     if (def.shield > 0) {
-      shieldRing = mk(shared.ring, accent, 0, 1.25 * scale, 0);
-      shieldRing.rotation.x = Math.PI / 2;
-      shieldRing.scale.setScalar(def.isElite ? 1.15 : 0.95);
+      const shieldMaterial = (accent as THREE.MeshLambertMaterial).clone();
+      shieldMaterial.transparent = true;
+      shieldMaterial.opacity = 0.4;
+      const shieldMesh = new THREE.Mesh(ring, shieldMaterial);
+      shieldMesh.scale.setScalar(Math.max(torsoW, torsoD) * 1.15);
+      shieldMesh.rotation.x = Math.PI / 2;
+      chest.add(shieldMesh);
+      meshes.push(shieldMesh);
+      shieldRing = shieldMesh;
     }
-
-    root.scale.setScalar(def.behavior === 'heavy' ? 1.25 : def.behavior === 'rusher' ? 0.9 : 1);
 
     return {
-      rig: { root, torso, head, legL, legR, armL, armR, visor, barrel, shieldRing },
+      skeleton,
+      animator: new EnemyAnimator(skeleton),
       meshes,
-      dispose: () => this.releaseMeshes(meshes),
+      flashable,
+      head: headShell,
+      indicator: indicatorMaterial,
+      barrel,
+      shieldRing,
+      muzzle,
+      dispose: () => {
+        for (const mesh of meshes) mesh.parent?.remove(mesh);
+        meshes.length = 0;
+        flashable.length = 0;
+        // Only instance-owned materials are disposed; shared ones stay cached.
+        indicatorMaterial.dispose();
+        if (shieldRing) (shieldRing.material as THREE.Material).dispose();
+        skeleton.dispose();
+      },
     };
   }
 
@@ -127,31 +381,26 @@ export class EnemyFactory {
     emissive = false,
   ): THREE.MeshLambertMaterial {
     const cacheKey = `${key}-${def.id}`;
-    const existing = this.materialCache.get(cacheKey);
+    const existing = this.materials.get(cacheKey);
     if (existing) return existing;
     const mat = new THREE.MeshLambertMaterial({
       color,
       flatShading: true,
       emissive: emissive ? new THREE.Color(color).multiplyScalar(0.55) : 0x000000,
     });
-    this.materialCache.set(cacheKey, mat);
+    this.materials.set(cacheKey, mat);
     return mat;
   }
 
-  private releaseMeshes(meshes: THREE.Mesh[]): void {
-    for (const mesh of meshes) {
-      mesh.parent?.remove(mesh);
-    }
-    meshes.length = 0;
-  }
-
   dispose(): void {
-    for (const mat of this.materialCache.values()) mat.dispose();
-    this.materialCache.clear();
+    for (const mat of this.materials.values()) mat.dispose();
+    this.materials.clear();
   }
 
   static disposeShared(): void {
-    for (const geo of Object.values(shared)) geo.dispose();
+    unit.dispose();
+    cylinder.dispose();
+    ring.dispose();
   }
 }
 
