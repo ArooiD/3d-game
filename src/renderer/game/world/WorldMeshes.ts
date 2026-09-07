@@ -71,19 +71,39 @@ export class WorldBuilder {
       const sin = Math.abs(Math.sin(angle));
       const ex = halfX * cos + halfZ * sin;
       const ez = halfX * sin + halfZ * cos;
+      // Primitives are centered on their own origin and every caller places
+      // them by center, so the collider has to follow the geometry's vertical
+      // bounds. Treating `y` as the bottom shifted each prop up by half its
+      // height, which is what snagged the player on invisible walls.
+      const spanY = this.verticalSpan(geometry, size.y);
       this.collision.addRawBox({
         minX: x - ex,
         maxX: x + ex,
-        minY: y,
-        maxY: y + size.y,
+        minY: y + spanY.min,
+        maxY: y + spanY.max,
         minZ: z - ez,
         maxZ: z + ez,
-        topY: y + size.y,
+        topY: y + spanY.max,
         solid: opts.solid ?? true,
         tags: opts.tags ?? [],
       });
     }
     return mesh;
+  }
+
+  /**
+   * Vertical extent of a collider relative to the mesh centre. Primitives are
+   * modelled around their own origin, so the honest answer is the geometry's
+   * bounding box; `height` is a fallback for a geometry without bounds.
+   */
+  private verticalSpan(geometry: THREE.BufferGeometry, height: number): { min: number; max: number } {
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    if (!bb) {
+      const half = height / 2;
+      return { min: -half, max: half };
+    }
+    return { min: bb.min.y, max: bb.max.y };
   }
 
   /** Collider footprint for a primitive: box params first, bounds otherwise. */

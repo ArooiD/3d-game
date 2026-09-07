@@ -8,6 +8,7 @@ import { CombatSystem } from '../src/renderer/game/combat/CombatSystem';
 import { TargetGrid, rayCylinder } from '../src/renderer/game/enemies/TargetRegistry';
 import { Enemy } from '../src/renderer/game/enemies/Enemy';
 import { EnemyFactory } from '../src/renderer/game/enemies/EnemyModels';
+import { WorldBuilder } from '../src/renderer/game/world/WorldMeshes';
 import { enemyDefinition } from '../src/renderer/data/enemies/enemies';
 import type { EffectsSystem } from '../src/renderer/game/effects/EffectsSystem';
 const effects = { impactHit() {}, fleshHit() {}, explosion() {}, ring() {} } as unknown as EffectsSystem;
@@ -97,4 +98,27 @@ test('target bounds crossing a grid boundary are found once; dead targets disapp
  assert.equal(grid.querySphere(v(12,1,0),3).length,1);
  enemy.alive=false; assert.equal(grid.querySphere(v(12,1,0),3).length,0);
  enemy.detach();
+});
+
+// A prop is placed by its centre (Three.js primitives are origin-centred), so the
+// collider must span the geometry bounds. Spanning [y, y+height] instead lifted
+// every solid half its height into the air: invisible walls, and floors you fell
+// through. Regression cover for WorldBuilder.box.
+test('prop colliders match the visible mesh, not a bottom-anchored box', () => {
+ const mat=new THREE.MeshLambertMaterial();
+ const w=new CollisionWorld(); const b=new WorldBuilder(w);
+ // Exactly the arena corner block: 6 x 3.4 x 6 centred at y = 1.7, so the
+ // visible body occupies y 0..3.4. The standable top must be 3.4 (the old
+ // collider said 5.1 and floated 1.7m of solid air above the mesh).
+ b.box(new THREE.BoxGeometry(6,3.4,6),mat,0,1.7,0);
+ close(w.surfaceHeight(0,0),3.4);
+ close(w.standingY(0,3.4,0,.4,1.8),3.4);
+ assert.equal(w.overlaps(0,3.4,0,.4,1.8).length,0,'standing on the visible top is not inside the block');
+ // A 0.5m step centred at y=0.25 must be walkable in stride; a collider lifted
+ // to 0.25..0.75 exceeds maxStep and reads as a wall instead.
+ const w2=new CollisionWorld(); const b2=new WorldBuilder(w2);
+ b2.box(new THREE.BoxGeometry(4,0.5,4),mat,20,0.25,20);
+ assert.equal(w2.overlaps(17,0,20,.4,1.8).length,0,'the walk-up starts clear of the step');
+ const p=w2.moveCylinder(v(17,0,20),v(1.5,0,0),.4,1.8,.6);
+ close(p.y,0.5); assert.ok(!p.hitWall,'a low ledge is a step, not a wall');
 });
