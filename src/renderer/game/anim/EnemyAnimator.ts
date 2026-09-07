@@ -82,15 +82,10 @@ const BONES = [
 /**
  * Persistent two-handed low-ready pose for ordinary ranged enemies.
  *
- * Enemy gun geometry is parented to forearmR. That means simply bending the
- * elbow forward also rotates the whole gun upward. The correct pose is a paired
- * shoulder/elbow solve: the upper arm swings forward while the forearm counter-
- * rotates by nearly the same amount. The hand therefore moves up in front of the
- * chest while the weapon itself keeps pointing along the actor's forward axis.
- *
- * The left arm uses the same solve but reaches a little farther so it visibly
- * supports the foregrip instead of hanging beside the body. This layer stays on
- * during idle, patrol and chase; ADS then blends on top of it.
+ * Enemy gun geometry is parented to forearmR. The upper arm therefore only needs
+ * a moderate forward swing: the elbow stays clearly below the shoulder while the
+ * forearm counter-rotates enough to bring the weapon across the torso. This reads
+ * as a real low-ready carry instead of either a dangling one-hand grip or a T pose.
  */
 function rangedCarryAdd(P: Pose, weight = 1, combatReady = false): void {
   const ready = combatReady ? 1 : 0.9;
@@ -98,12 +93,12 @@ function rangedCarryAdd(P: Pose, weight = 1, combatReady = false): void {
 
   P.add('chest', combatReady ? 1.5 : 0.5, 0, 0, w);
   P.add('shoulderR', -3, -1, 4, w);
-  P.add('armR', 43, -2, 2, w);
-  P.add('forearmR', -31, 1, 0, w);
+  P.add('armR', 28, -2, 2, w);
+  P.add('forearmR', -20, 1, 0, w);
 
   P.add('shoulderL', -4, 2, -7, w);
-  P.add('armL', 47, 3, -3, w);
-  P.add('forearmL', -34, -2, 0, w);
+  P.add('armL', 32, 3, -3, w);
+  P.add('forearmL', -23, -2, 0, w);
 }
 
 export class EnemyAnimator {
