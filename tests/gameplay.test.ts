@@ -12,6 +12,9 @@ import { WorldBuilder } from '../src/renderer/game/world/WorldMeshes';
 import { buildCharacterModel } from '../src/renderer/game/player/CharacterModels';
 import { buildGunModel, fitGunLength } from '../src/renderer/game/weapons/WeaponModels';
 import { generateWeapon } from '../src/renderer/game/weapons/WeaponGenerator';
+import { EnemyAnimator, type EnemyAnimContext } from '../src/renderer/game/anim/EnemyAnimator';
+import { IDLE_VARIANTS, idle } from '../src/renderer/game/anim/Clips';
+import { Pose } from '../src/renderer/game/anim/Rig';
 import type { BoneName } from '../src/renderer/game/anim/Rig';
 import { PLAYER_HEIGHT } from '../src/shared/constants';
 import type { CharacterId } from '../src/shared/types';
@@ -295,4 +298,78 @@ test('human faces are front-facing ray targets and follow the animated head', ()
     assert.notDeepEqual(new THREE.Box3().setFromObject(face).min.toArray(), bounds.min.toArray());
     actor.dispose();
   }
+});
+
+const idleContext: EnemyAnimContext = {
+  speed: 0, moveSpeed: 4, state: 'idle', sinceShot: -1, sinceHit: -1,
+  hitRegion: 0, hitSide: 0, swing: -1, melee: false, aiming: false,
+  crouched: false, braced: false, alerted: -1, boss: false, death: -1, dt: 1/60,
+};
+
+test('four idles have distinct silhouettes, planted roots and no combat gestures', () => {
+  const signatures = new Set<string>();
+  const neutral = new Pose(); idle(neutral, 2, 1, 'relaxed', 0);
+  for (const variant of IDLE_VARIANTS) {
+    const p = new Pose(); idle(p, 2, 1, variant);
+    signatures.add(Array.from(p.euler).join(','));
+    assert.equal(p.hipY, 0, 'idle bob lifts feet off the ground');
+    const suppressed = new Pose(); idle(suppressed, 2, 1, variant, 0);
+    assert.deepEqual(suppressed.euler, neutral.euler, 'combat still includes idle gestures');
+  }
+  assert.equal(signatures.size, 4);
+});
+
+test('idle stays alive at zero speed and transitions without snapping or a T pose', () => {
+  const factory = new EnemyFactory();
+  for (const id of ['raider', 'rusher', 'heavy', 'sniper']) {
+    const built = factory.create(enemyDefinition(id)!);
+    const animator = new EnemyAnimator(built.skeleton, 0);
+    let previous: number[] | undefined;
+    const samples = new Set<string>();
+    // Covers all four variants and the transition back to the first one.
+    for (let frame=0; frame<1800; frame++) {
+      animator.update({...idleContext, melee:id==='rusher'});
+      const angles = [...built.skeleton.bones.values()].flatMap(b=>[b.rotation.x,b.rotation.y,b.rotation.z]);
+      assert.ok(angles.every(Number.isFinite));
+      if (previous) assert.ok(Math.max(...angles.map((a,i)=>Math.abs(a-previous![i]!))) < .04, `${id} idle snapped`);
+      previous = angles;
+      if (frame % 60 === 0) samples.add(angles.map(a=>a.toFixed(3)).join(','));
+      built.skeleton.root.updateMatrixWorld(true);
+      for (const side of ['L','R']) {
+        const shoulder = built.skeleton.bones.get(`arm${side}` as BoneName)!.getWorldPosition(v());
+        const elbow = built.skeleton.bones.get(`forearm${side}` as BoneName)!.getWorldPosition(v());
+        assert.ok(elbow.y < shoulder.y - .08, `${id} raises upper arms to a T pose`);
+      }
+    }
+    assert.ok(samples.size > 25, `${id} idle is frozen`);
+    animator.update({...idleContext, state:'attack', aiming:true});
+    for(let i=0;i<90;i++) animator.update({...idleContext,state:'attack',aiming:true});
+    assert.ok(built.skeleton.bones.get('armR')!.rotation.x > .5, 'weapon arm never raises for aiming');
+    const raised = built.skeleton.bones.get('armR')!.rotation.x;
+    animator.update(idleContext);
+    assert.ok(Math.abs(built.skeleton.bones.get('armR')!.rotation.x-raised)<.15, 'weapon snaps down on leaving aim');
+    animator.update({...idleContext,state:'dead',death:1});
+    const death = built.skeleton.root.rotation.x;
+    animator.update({...idleContext,state:'dead',death:1});
+    assert.equal(built.skeleton.root.rotation.x, death, 'idle moves a dead body');
+    built.dispose();
+  }
+  factory.dispose();
+});
+
+test('idle timing is independent of frame rate and stride phase resync', () => {
+  const factory = new EnemyFactory();
+  const evaluate = (fps: number, sync: boolean) => {
+    const built = factory.create(enemyDefinition('raider')!);
+    const animator = new EnemyAnimator(built.skeleton, .3);
+    for(let i=0;i<fps*5;i++) {
+      if(sync && i % fps === 0) animator.syncPhase();
+      animator.update({...idleContext,dt:1/fps});
+    }
+    const angles = [...built.skeleton.bones.values()].flatMap(b=>[b.rotation.x,b.rotation.y,b.rotation.z]);
+    built.dispose(); return angles;
+  };
+  const a = evaluate(30,false), b = evaluate(144,true);
+  a.forEach((angle,i)=>assert.ok(Math.abs(angle-b[i]!)<1e-5));
+  factory.dispose();
 });

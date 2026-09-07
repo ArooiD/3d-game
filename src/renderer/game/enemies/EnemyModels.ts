@@ -183,15 +183,15 @@ export class EnemyFactory {
     for (const name of flatBones) skeleton.setBind(name);
 
     const shoulderY = height * p.torsoHeight * 0.42;
-    const armHang = def.behavior === 'rusher' ? -6 : -2;
+    const armHang = def.behavior === 'rusher' ? 6 : 12;
     for (const side of [-1, 1] as const) {
       const tag = side < 0 ? 'L' : 'R';
       skeleton.bone(`shoulder${tag}`, chest, side * p.shoulderWidth * (def.behavior === 'boss' ? 1 : height) * 0.5, shoulderY, 0);
-      skeleton.setBind(`shoulder${tag}`, 0, 0, side * 4);
+      skeleton.setBind(`shoulder${tag}`, 0, 0, side * 2);
       skeleton.bone(`arm${tag}`, skeleton.bones.get(`shoulder${tag}`)!, 0, -height * 0.02, 0);
-      skeleton.setBind(`arm${tag}`, armHang, 0, side * 6);
+      skeleton.setBind(`arm${tag}`, armHang, 0, side * 2);
       skeleton.bone(`forearm${tag}`, skeleton.bones.get(`arm${tag}`)!, 0, -height * p.upperArm, 0);
-      skeleton.setBind(`forearm${tag}`, def.behavior === 'rusher' ? -18 : -12);
+      skeleton.setBind(`forearm${tag}`, def.behavior === 'rusher' ? 12 : -24);
 
       skeleton.bone(`thigh${tag}`, hips, side * p.torsoWidth * 0.28, -height * 0.02, 0);
       skeleton.setBind(`thigh${tag}`, 0, 0, side * 2);

@@ -97,24 +97,49 @@ export function gait(P: Pose, ph: number, k: GaitParams, weight = 1): void {
   P.add('shoulderR', k.armSwing * sin(t) - 1, 0, 1.5, weight);
 }
 
-/** Weapon-braced idle: small breathing, weight even, muzzle drifting. */
-export function idle(P: Pose, ph: number, weight = 1): void {
-  const t = ph * TAU;
-  const breath = sin(t * 0.55);
-  const sway = sin(t * 0.31 + 1.1);
-  const micro = sin(t * 1.7 + 0.4) * 0.35 + sin(t * 2.9) * 0.2;
-  P.hipY += 0.012 * sway * weight;
-  P.add('hips', -1.5, 2.2 * sway, 1.6, weight);
-  P.add('spine', 1.6 + 0.7 * breath, -1.4 * sway, -0.8, weight);
-  P.add('chest', 1.2 + 0.9 * breath, -1.0 * sway, -0.6, weight);
-  P.add('neck', -0.6 + 1.1 * breath, 1.2 * sway + micro, 0.4, weight);
-  P.add('head', -1.2, 1.0 * micro, 0.6 * sway, weight);
-  P.add('thighL', -2, 0, 1.5, weight);
-  P.add('thighR', -1.5, 0, -1.5, weight);
-  P.add('shinL', 4, 0, 0, weight);
-  P.add('shinR', 3, 0, 0, weight);
-  P.add('shoulderL', -0.8 * breath, 0, -1, weight);
-  P.add('shoulderR', 0.6 * breath, 0, 1, weight);
+export const IDLE_VARIANTS = ['relaxed', 'lookout', 'weightShift', 'gearCheck'] as const;
+export type IdleVariant = typeof IDLE_VARIANTS[number];
+
+/** Continuous time, independent of footsteps. Gestures fade out before combat.
+ * Upper arms stay near the ribs; all poses preserve the planted leg chain. */
+export function idle(P: Pose, seconds: number, weight = 1, variant: IdleVariant = 'relaxed', gestures = 1): void {
+  const breath = sin(seconds * 1.65);
+  const sway = sin(seconds * .67 + 1.1);
+  P.add('spine', .5 + .55 * breath, -.7 * sway, 0, weight);
+  P.add('chest', .5 + .65 * breath, .5 * sway, 0, weight);
+  P.add('neck', -.4 * breath, .7 * sway, 0, weight);
+  P.add('shoulderL', -.35 * breath, 0, 0, weight);
+  P.add('shoulderR', .35 * breath, 0, 0, weight);
+  const w = weight * gestures;
+  // Low carry, elbows bent and asymmetric rather than a rigid spread stance.
+  P.add('armL', 8 + .7 * breath, 0, 1, w);
+  P.add('armR', 12 + .6 * breath, 0, -1, w);
+  P.add('forearmL', -9, 0, 0, w);
+  P.add('forearmR', -12, 0, 0, w);
+  if (variant === 'lookout') {
+    const scan = sin(seconds * .48);
+    P.add('chest', 0, 3 * scan, 0, w);
+    P.add('neck', 0, 8 * scan, 0, w);
+    P.add('head', -2 + sin(seconds * .7), 14 * scan, 0, w);
+    P.add('forearmL', -8, 0, 0, w);
+  } else if (variant === 'weightShift') {
+    // Counter-lean above the hips: no root bob that lifts the feet off the floor.
+    P.add('spine', 1, 2 * sway, 2.5 * sway, w);
+    P.add('chest', -1, -2 * sway, -1.5 * sway, w);
+    P.add('head', 0, -3 * sway, -.8 * sway, w);
+    P.add('armL', -5, 0, 2 * sway, w);
+    P.add('armR', 3, 0, 2 * sway, w);
+  } else if (variant === 'gearCheck') {
+    const check = (.5 + .5 * sin(seconds * .8)) ** 2;
+    P.add('head', 12 * check, -9 * check, 0, w);
+    P.add('neck', 3 * check, 0, 0, w);
+    P.add('armL', 24 * check, -8 * check, 0, w);
+    P.add('forearmL', -22 * check, 0, 0, w);
+    P.add('chest', 2 * check, -3 * check, 0, w);
+  } else {
+    P.add('head', sin(seconds * .6), 2 * sway, .6 * sway, w);
+    P.add('forearmL', 2 * sway, 0, 0, w);
+  }
 }
 
 /** Aiming layer: shoulders square up, support arm comes under the stock. */
@@ -122,11 +147,11 @@ export function aimAdd(P: Pose, weight = 1): void {
   P.add('chest', 2.5, 0, 0, weight);
   P.add('neck', -2, 0, 0, weight);
   P.add('shoulderR', -4, 0, 3, weight);
-  P.add('armR', -6, 0, 4, weight);
-  P.add('forearmR', -8, 0, 0, weight);
+  P.add('armR', 42, 0, 0, weight);
+  P.add('forearmR', -36, 0, 0, weight);
   P.add('shoulderL', -3, 0, -6, weight);
-  P.add('armL', -14, 0, -8, weight);
-  P.add('forearmL', -22, 0, 0, weight);
+  P.add('armL', 50, 0, 2, weight);
+  P.add('forearmL', -44, 0, 0, weight);
 }
 
 /** Recoil impulse: chest absorbs, muzzle lifts, hips dip. `t` runs 0→1. */

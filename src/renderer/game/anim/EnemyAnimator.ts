@@ -12,6 +12,7 @@ import {
   gait,
   hitAdd,
   idle,
+  IDLE_VARIANTS,
   patrolAdd,
   retreatAdd,
   RUN,
@@ -80,7 +81,16 @@ const BONES = [
 
 export class EnemyAnimator {
   /** Stride phase, advanced by measured distance so footsteps match speed. */
-  private phase = Math.random();
+  private phase: number;
+  private idleTime: number;
+  private idleAge = 0;
+  private idleVariant: number;
+  private previousIdle: number;
+  private idleTransition = 1;
+  private idleDuration: number;
+  private idleTempo: number;
+  private combatWeight = 0;
+  private aimWeight = 0;
   private base = new Pose();
   private layer = new Pose();
   private scratch = new THREE.Vector3();
@@ -88,10 +98,22 @@ export class EnemyAnimator {
   private runWeight = 0;
   private idleWeight = 1;
 
-  constructor(private skeleton: Skeleton) {}
+  /** Optional seed makes pose sequences reproducible in tests and previews. */
+  constructor(private skeleton: Skeleton, seed = Math.random()) {
+    const value = Number.isFinite(seed) ? ((seed % 1) + 1) % 1 : 0;
+    this.phase = value;
+    this.idleTime = value * 37;
+    this.idleTempo = .85 + value * .3;
+    this.idleDuration = 6 + value * 4;
+    this.idleVariant = Math.floor(value * IDLE_VARIANTS.length);
+    this.previousIdle = this.idleVariant;
+    // A newly spawned actor is already posed, before its first AI update.
+    idle(this.base, this.idleTime, 1, IDLE_VARIANTS[this.idleVariant]!);
+    this.apply(this.base);
+  }
 
   update(context: EnemyAnimContext): void {
-    const { dt } = context;
+    const dt = Number.isFinite(context.dt) ? THREE.MathUtils.clamp(context.dt, 0, .1) : 0;
     const base = this.base;
     const layer = this.layer;
     base.reset();
@@ -120,7 +142,27 @@ export class EnemyAnimator {
     this.runWeight += (runTarget - this.runWeight) * blend;
     this.idleWeight = Math.max(0, 1 - this.walkWeight * 1.15);
 
-    if (this.idleWeight > 0.001) idle(base, this.phase, this.idleWeight);
+    this.idleTime += dt * this.idleTempo;
+    const combat = context.aiming || context.melee && context.swing >= 0 ||
+      context.state === 'alert' || context.state === 'attack' || context.state === 'chase' || context.state === 'retreat';
+    this.combatWeight += ((combat ? 1 : 0) - this.combatWeight) * (1 - Math.exp(-dt * 12));
+    if (!combat && normalised < .05) {
+      this.idleAge += dt;
+      if (this.idleAge >= this.idleDuration) {
+        this.idleAge -= this.idleDuration;
+        this.previousIdle = this.idleVariant;
+        this.idleVariant = (this.idleVariant + 1) % IDLE_VARIANTS.length;
+        this.idleTransition = 0;
+      }
+    }
+    this.idleTransition = Math.min(1, this.idleTransition + dt / 1.2);
+    if (this.idleWeight > .001) {
+      const t = this.idleTransition;
+      const mix = t * t * (3 - 2 * t);
+      const gestures = (1 - this.combatWeight) * (context.boss ? .35 : 1);
+      idle(base, this.idleTime, this.idleWeight * (1 - mix), IDLE_VARIANTS[this.previousIdle]!, gestures);
+      idle(base, this.idleTime, this.idleWeight * mix, IDLE_VARIANTS[this.idleVariant]!, gestures);
+    }
     if (this.walkWeight > 0.001 && this.runWeight < 0.999) {
       gait(base, this.phase, WALK, this.walkWeight * (1 - this.runWeight));
     }
@@ -129,7 +171,8 @@ export class EnemyAnimator {
     }
 
     // --- additive combat layers --------------------------------------------
-    if (context.aiming) aimAdd(layer, 0.9);
+    this.aimWeight += ((context.aiming ? 1 : 0) - this.aimWeight) * (1 - Math.exp(-dt * 12));
+    if (this.aimWeight > .001) aimAdd(layer, .9 * this.aimWeight);
     if (context.braced) braceAdd(layer, 1);
     if (context.crouched) crouchAdd(layer, 1);
     if (context.state === 'patrol') patrolAdd(layer, this.phase, 1);
