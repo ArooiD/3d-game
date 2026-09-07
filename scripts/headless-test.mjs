@@ -593,6 +593,8 @@ async function run() {
       `xp ${xpBefore} -> ${killOutcome.xp}, dead=${killOutcome.dead}`);
 
     // ---- performance: measure the cost of the animated rigs ----------------
+    // The stress mob is torn down immediately after measuring: with navigation
+    // live it would otherwise walk into the player and kill them mid-suite.
     const perf = await client.evaluate(`
       const g = window.__game;
       const origin = g.controller.position.clone();
@@ -616,6 +618,8 @@ async function run() {
     check('performance: rig cost stays bounded with 20+ enemies',
       Boolean(perf) && perf.alive >= 20 && perf.calls < 3000,
       JSON.stringify(perf));
+
+    await client.evaluate('window.__game.enemies.clear(); return true;');
 
 
     // ---- weapon models: procedural guns must be real, distinct and finite ---
@@ -866,6 +870,7 @@ async function run() {
       + ', bones moved=' + (fallen ? fallen.moved : 'n/a'));
 
     // ---- enough XP raises the level and grants a skill point ----------------
+    await client.evaluate('window.__game.enemies.clear(); return true;');
     const leveled = await client.waitFor('the player to reach level 2', `
       const g = window.__game;
       if (g.player.level < 2) g.player.addXp(Math.max(200, g.player.xpNeeded * 2));
@@ -885,10 +890,10 @@ async function run() {
       if (!node) return { points: g.player.skillPoints, ranks: 0, nodes: body.querySelectorAll('.skill').length };
       node.click();
       const ranks = Object.values(g.player.skillRanks).reduce((sum, r) => sum + r, 0);
-      return ranks > 0 ? { ranks, points: g.player.skillPoints } : { points: g.player.skillPoints, ranks: 0, nodes: body.querySelectorAll('.skill').length };
+      return ranks > 0 ? { ranks, points: g.player.skillPoints } : { points: g.player.skillPoints, ranks: 0, nodes: body.querySelectorAll('.skill').length, hidden: panel.classList.contains('hidden'), dead: g.player.dead, enemies: g.enemies.enemies.filter((e) => e.alive).length };
     `, cap(8000));
     check('skills: clicking a node spends a point and stores the rank', Number(spent.ranks) >= 1,
-      `ranks=${spent.ranks} pointsLeft=${spent.points}`);
+      `ranks=${spent.ranks} pointsLeft=${spent.points} nodes=${spent.nodes ?? 'n/a'} hidden=${spent.hidden} dead=${spent.dead} enemies=${spent.enemies}`);
     await client.evaluate(`
       const panel = document.getElementById('ui-skills');
       if (panel && !panel.classList.contains('hidden')) window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyK', key: 'k', bubbles: true }));

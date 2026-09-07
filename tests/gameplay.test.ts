@@ -78,7 +78,7 @@ test('hostile projectile hits player once along its swept trajectory', () => {
 });
 test('enemy loses unseen target, does not shoot through cover, and falls while idle', () => {
  const def=enemyDefinition('raider')!, factory=new EnemyFactory(), built=factory.create(def);
- const enemy=new Enemy(def,1,built.rig,built.dispose); enemy.place(0,5,0);
+ const enemy=new Enemy(def,1,built); enemy.place(0,5,0);
  const context={dt:1/60,playerPosition:v(8,0,0),playerAlive:true,playerVisible:true,damagePlayer(){},shootAt(){shots++;},explodeAt(){},time:0};
  const w=new CollisionWorld(); let shots=0;
  for(let i=0;i<90;i++) enemy.tick(context,w,effects);
@@ -91,7 +91,7 @@ test('enemy loses unseen target, does not shoot through cover, and falls while i
 
 test('target bounds crossing a grid boundary are found once; dead targets disappear', () => {
  const def=enemyDefinition('raider')!, built=new EnemyFactory().create(def);
- const enemy=new Enemy(def,1,built.rig,built.dispose); enemy.place(12.1,0,0);
+ const enemy=new Enemy(def,1,built); enemy.place(12.1,0,0);
  const grid=new TargetGrid(); grid.register(enemy);
  assert.equal(grid.querySphere(v(11.9,1,0),.2).length,1);
  assert.equal(grid.querySphere(v(12,1,0),3).length,1);
