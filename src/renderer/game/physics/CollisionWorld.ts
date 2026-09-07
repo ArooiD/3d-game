@@ -325,11 +325,21 @@ export class CollisionWorld {
       // the body can then slide along the face on this same step.
       const embedded = this.deepestPush(result.x, result.z, result.y, height, radius);
       if (embedded) {
-        result.x += embedded.px;
-        result.z += embedded.pz;
-        result.hitWall = true;
-        result.normalX = embedded.nx;
-        result.normalZ = embedded.nz;
+        // Inside a low ledge, the way out is up, not sideways: a capsule whose feet
+        // sank into a 0.3 m floor slab was being pushed back along its incoming
+        // direction every frame and never gained ground on it. Stepping onto the
+        // top is what the same ledge does when approached from outside.
+        const top = embedded.box.topY;
+        if (dy <= 0 && top > result.y && top - result.y <= maxStep &&
+            !this.blocksAt(result.x, result.z, top, radius, height)) {
+          result.y = top;
+        } else {
+          result.x += embedded.px;
+          result.z += embedded.pz;
+          result.hitWall = true;
+          result.normalX = embedded.nx;
+          result.normalZ = embedded.nz;
+        }
       }
       const supported = result.y <= this.footprintSurface(result.x, result.z, result.y, radius) + EPSILON;
       /** Ledge height gained by a step-up this sub-step, if any. */

@@ -251,7 +251,7 @@ test(
     if (out.longestFreeze > 120) problems.push(`${label}: frozen for ${out.longestFreeze} frames`);
     if (remaining > 5) problems.push(`${label}: stopped ${remaining.toFixed(1)} m short`);
     pos.x = out.x; pos.z = out.z;
-    pos.y = level.collision.footprintSurface(out.x, out.z, pos.y + 0.62, R, 0.06);
+    pos.y = level.collision.surfaceHeight(out.x, out.z);
   }
   assert.deepEqual(problems, [], problems.join('\n'));
 });
