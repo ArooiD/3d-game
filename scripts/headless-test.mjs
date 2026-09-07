@@ -33,7 +33,7 @@ const ROOT = resolve(import.meta.dirname, '..');
 const ELECTRON_BIN = join(ROOT, 'node_modules', 'electron', 'dist', 'electron');
 const PORT = Number(process.env.HEADLESS_TEST_PORT ?? 9222);
 const USE_HEADLESS_FLAG = process.env.HEADLESS_TEST_HEADED !== '1';
-const BUDGET_MS = Number(process.env.HEADLESS_TEST_TIMEOUT_MS ?? 30_000);
+const BUDGET_MS = Number(process.env.HEADLESS_TEST_TIMEOUT_MS ?? 75_000);
 const DEADLINE = Date.now() + BUDGET_MS;
 
 /** Full-screen panels from index.html, used to record screen transitions. */
@@ -490,6 +490,187 @@ async function run() {
 
     const stateNow = await client.evaluate('const g = window.__game; g.reportDebug(); return g.debug.__smokeState;');
     check("engine: state manager still reports 'PLAYING'", stateNow === 'PLAYING', `states.state=${stateNow}`);
+
+    // ============ FULL LOOP: loot -> compare -> equip -> kill -> XP -> skills ====
+
+    // ---- a rare weapon appears on the ground --------------------------------
+    const groundCountBefore = await client.evaluate('return window.__game.loot.items.length;');
+    await client.evaluate('const g = window.__game; g.director.spawnChest(g.controller.position.clone(), g.player.level, "rare"); return true;');
+    const dropped = await client.waitFor('the spawned weapon to appear on the ground', `
+      const items = window.__game.loot.items.filter((i) => i.kind === 'weapon' && i.weapon);
+      return items.length > ${groundCountBefore} ? items[items.length - 1] : null;
+    `, cap(5000));
+    const ground = await client.evaluate(`
+      const item = window.__game.loot.items[window.__game.loot.items.length - 1];
+      return { count: window.__game.loot.items.length, rarity: item.rarity, name: item.weapon.name };
+    `);
+    check('loot: spawnChest drops a rare weapon on the ground', ground.rarity === 'rare',
+      `ground=${ground.count} item="${ground.name}" rarity=${ground.rarity} (dropped=${Boolean(dropped)})`);
+
+    // ---- stepping onto it raises the comparison tooltip ---------------------
+    const focus = await client.waitFor('the loot tooltip to focus the dropped weapon', `
+      const g = window.__game;
+      const item = g.loot.items.find((i) => i.kind === 'weapon' && i.weapon);
+      if (!item) return null;
+      g.controller.position.set(item.position.x, g.controller.position.y, item.position.z);
+      const payload = g.loot.update(0.016, g.controller.position, g.weapons.slots);
+      return payload && payload.weapon ? payload : null;
+    `, cap(5000));
+    check('loot: tooltip compares the drop against the equipped weapon',
+      Array.isArray(focus.comparison) && focus.comparison.length >= 2,
+      `weapon="${focus.weapon.name}" rows=${focus.comparison.map((row) => row.label).join('/')}`);
+
+    // ---- E picks it up: it lands in the next free slot and becomes active;
+    // the starter stays equipped in slot 0 because nothing had to be displaced.
+    const equippedBefore = await client.evaluate('return window.__game.weapons.slots.map((s) => s && s.name);');
+    await client.evaluate('window.__game.interact(); return true;');
+    const equippedAfter = await client.waitFor('the picked weapon to become the active slot', `
+      const g = window.__game;
+      const slot = g.weapons.slots[g.weapons.activeSlot];
+      return slot && slot.name === ${JSON.stringify(focus.weapon.name)} ? slot.name : null;
+    `, cap(5000));
+    const groundAfterPickup = await client.evaluate('return window.__game.loot.items.filter((i) => i.kind === "weapon").length;');
+    check('loot: pressing E picks the weapon up and equips it',
+      equippedAfter === focus.weapon.name && groundAfterPickup < ground.count,
+      `active "${equippedBefore[0]}" -> "${equippedAfter}", ground ${ground.count} -> ${groundAfterPickup}`);
+    check('loot: starter weapon survives while a free slot exists',
+      (await client.evaluate('return Boolean(window.__game.weapons.slots[0]);')) === true);
+
+    // ---- fill the last free slot, then a fourth pickup must displace one ------
+    await client.evaluate('const g = window.__game; g.director.spawnChest(g.controller.position.clone(), g.player.level, "epic"); return true;');
+    await client.waitFor('the second drop to be focused', `
+      const g = window.__game;
+      const item = g.loot.items.find((i) => i.kind === 'weapon' && i.weapon && !g.weapons.slots.some((s) => s && s.name === i.weapon.name));
+      if (!item) return null;
+      g.controller.position.set(item.position.x, g.controller.position.y, item.position.z);
+      return g.loot.update(0.016, g.controller.position, g.weapons.slots) ? true : null;
+    `, cap(5000));
+    await client.evaluate('window.__game.interact(); return true;');
+    await client.evaluate('const g = window.__game; g.director.spawnChest(g.controller.position.clone(), g.player.level, "rare"); return true;');
+    const displaced = await client.waitFor('a third pickup to displace the active weapon into the backpack', `
+      const g = window.__game;
+      const item = g.loot.items.find((i) => i.kind === 'weapon' && i.weapon && !g.weapons.slots.some((s) => s && s.name === i.weapon.name));
+      if (!item) return null;
+      g.controller.position.set(item.position.x, g.controller.position.y, item.position.z);
+      const payload = g.loot.update(0.016, g.controller.position, g.weapons.slots);
+      if (!payload || !payload.weapon) return null;
+      const activeBefore = g.weapons.slots[g.weapons.activeSlot].name;
+      g.interact();
+      return g.backpack.length > 0 ? { picked: payload.weapon.name, activeBefore, backpack: g.backpack.map((w) => w.name) } : null;
+    `, cap(6000));
+    check('loot: a pickup with all slots full swaps out and banks the old weapon',
+      displaced.backpack.includes(displaced.activeBefore),
+      `picked="${displaced.picked}" banked="${displaced.backpack.join(',')}"`);
+
+    // ---- spawn an enemy and kill it -----------------------------------------
+    await client.evaluate(`
+      const g = window.__game;
+      if (g.enemies.enemies.length === 0) {
+        const forward = g.controller.forwardVector(new (g.controller.position.constructor)(0, 0, 0)).multiplyScalar(10);
+        g.enemies.spawnRandomAt(g.controller.position.clone().add(forward), g.player.level);
+      }
+      return true;
+    `);
+    const enemyCount = await client.waitFor('a spawned enemy to be alive', 'return window.__game.enemies.enemies.length || null;', cap(6000));
+    check('combat: enemies spawn into the world', Number(enemyCount) >= 1, `enemies alive=${enemyCount}`);
+
+    const xpBefore = await client.evaluate('return window.__game.player.xp;');
+    await client.evaluate(`
+      const g = window.__game;
+      const enemy = g.enemies.enemies.find((e) => !e.dead);
+      if (!enemy) return false;
+      enemy.applyDamage(enemy.maxHealth + enemy.shield + 1000, {
+        headshot: false, critical: false, shieldBonus: 0,
+        fromPlayer: true, direction: new (g.controller.position.constructor)(0, 1, 0),
+      });
+      return true;
+    `);
+    const killOutcome = await client.waitFor('the kill to award XP', `
+      const g = window.__game;
+      return g.player.xp > ${xpBefore} ? { xp: g.player.xp, dead: g.enemies.enemies.filter((e) => e.dead).length } : null;
+    `, cap(6000));
+    check('combat: killing an enemy awards XP', Number(killOutcome.xp) > Number(xpBefore),
+      `xp ${xpBefore} -> ${killOutcome.xp}, dead=${killOutcome.dead}`);
+
+    // ---- enough XP raises the level and grants a skill point ----------------
+    const leveled = await client.waitFor('the player to reach level 2', `
+      const g = window.__game;
+      if (g.player.level < 2) g.player.addXp(Math.max(200, g.player.xpNeeded * 2));
+      return g.player.level >= 2 ? { level: g.player.level, points: g.player.skillPoints } : null;
+    `, cap(8000));
+    check('progression: leveling up grants a skill point', leveled.level >= 2 && leveled.points >= 1,
+      `level=${leveled.level} skillPoints=${leveled.points}`);
+
+    // ---- open the skill tree and spend the point through the UI -------------
+    const spent = await client.waitFor('a skill node click to spend a point', `
+      const g = window.__game;
+      const body = document.getElementById('skills-body');
+      const panel = document.getElementById('ui-skills');
+      if (!body || !panel) return null;
+      if (panel.classList.contains('hidden')) window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyK', key: 'k', bubbles: true }));
+      const node = body.querySelector('.skill.usable');
+      if (!node) return { points: g.player.skillPoints, ranks: 0, nodes: body.querySelectorAll('.skill').length };
+      node.click();
+      const ranks = Object.values(g.player.skillRanks).reduce((sum, r) => sum + r, 0);
+      return ranks > 0 ? { ranks, points: g.player.skillPoints } : { points: g.player.skillPoints, ranks: 0, nodes: body.querySelectorAll('.skill').length };
+    `, cap(8000));
+    check('skills: clicking a node spends a point and stores the rank', Number(spent.ranks) >= 1,
+      `ranks=${spent.ranks} pointsLeft=${spent.points}`);
+    await client.evaluate(`
+      const panel = document.getElementById('ui-skills');
+      if (panel && !panel.classList.contains('hidden')) window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyK', key: 'k', bubbles: true }));
+      return true;
+    `);
+
+    // ---- firing the equipped weapon burns magazine ammo ---------------------
+    const fired = await client.waitFor('a shot to consume a round', `
+      const g = window.__game;
+      const weapon = g.weapons.current;
+      if (!weapon) return null;
+      const before = weapon.ammo;
+      const context = { damageMultiplier: 1, fireRateMultiplier: 1, spreadMultiplier: 1,
+                        criticalChance: 0, criticalMultiplier: 2, reloadTimeMultiplier: 1 };
+      g.weapons.tryFire(context, true, true);
+      return weapon.ammo < before ? { before, after: weapon.ammo, name: weapon.name } : null;
+    `, cap(6000));
+    check('gunplay: firing consumes a round from the magazine', Number(fired.after) === Number(fired.before) - 1,
+      `"${fired.name}" ammo ${fired.before} -> ${fired.after}`);
+
+    // ---- save, leave the run, and come back through CONTINUE ----------------
+    const snapshot = await client.evaluate(`
+      const g = window.__game;
+      return { level: g.player.level, xp: g.player.xp, points: g.player.skillPoints,
+               weapon: g.weapons.slots[0] && g.weapons.slots[0].name,
+               backpack: g.backpack.length,
+               ranks: Object.keys(g.player.skillRanks).filter((k) => g.player.skillRanks[k] > 0).length };
+    `);
+    await client.evaluate('window.__game.performSave("test"); return true;');
+    check('save: the store reports a written save',
+      (await client.waitFor('saves.hasSave to become true', 'return window.__game.saves.hasSave ? true : null;', cap(8000))) === true);
+
+    await client.evaluate('window.__game.returnToMenu(); return true;');
+    await client.waitFor("state 'MainMenu' after returnToMenu", stateIs('MAIN_MENU'), cap(12_000));
+    check('menu: returnToMenu saves the run and lands in MainMenu', true);
+    check('menu: CONTINUE is enabled once a save exists',
+      (await client.evaluate('return !document.getElementById("btn-continue").disabled;')) === true);
+
+    await client.click('#btn-continue');
+    await client.waitFor("state 'Playing' after CONTINUE", stateIs('PLAYING'), cap(15_000));
+    const restored = await client.evaluate(`
+      const g = window.__game;
+      return { level: g.player.level, xp: g.player.xp, points: g.player.skillPoints,
+               weapon: g.weapons.slots[0] && g.weapons.slots[0].name,
+               backpack: g.backpack.length,
+               ranks: Object.keys(g.player.skillRanks).filter((k) => g.player.skillRanks[k] > 0).length };
+    `);
+    check('continue: level and XP survive save + reload',
+      restored.level === snapshot.level && restored.xp === snapshot.xp,
+      `level ${snapshot.level}->${restored.level}, xp ${snapshot.xp}->${restored.xp}`);
+    check('continue: equipped weapon survives save + reload',
+      Boolean(restored.weapon) && restored.weapon === snapshot.weapon, `weapon="${restored.weapon}"`);
+    check('continue: backpack and skill ranks survive save + reload',
+      restored.backpack === snapshot.backpack && restored.ranks === snapshot.ranks,
+      `backpack ${snapshot.backpack}->${restored.backpack}, skillNodes ${snapshot.ranks}->${restored.ranks}`);
 
     const errors = client.rendererErrors();
     check('runtime: no uncaught renderer exceptions', errors.length === 0, errors.slice(0, 2).join(' | ').slice(0, 400));

@@ -12,7 +12,7 @@ import { SAVE_VERSION } from '../../shared/constants';
  *   settings.json
  */
 
-const SAVE_FILE = /^slot-\d+\.json$/;
+const SAVE_FILE = /^[A-Za-z0-9_-]+\.json$/;
 
 function savesDir(): string {
   const dir = path.join(app.getPath('userData'), 'saves');

@@ -310,7 +310,6 @@ export class GameApp {
       fActive: this.abilityF.remaining > 0,
     });
 
-    this.handleCheats();
     if (this.player.dead) this.onPlayerDeath();
   }
 
@@ -954,11 +953,6 @@ export class GameApp {
       // Losing lock outside a menu means the OS took it; pause to be safe.
       if (states.isPlaying() && !this.player.dead) this.openPause();
     }, this);
-  }
-
-  private handleCheats(): void {
-    if (!isDevelopment()) return;
-    // F-keys fire through hotkeys; nothing polled per frame.
   }
 
   private cheatSpawnEnemy(): void {
