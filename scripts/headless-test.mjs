@@ -634,6 +634,100 @@ async function run() {
       && bars.visible === true && bars.onScreen === true
       && bars.fillWidth > 0 && bars.fillWidth < bars.w,
       JSON.stringify({ barReport, bars }));
+
+    // ---- aiming down sights -------------------------------------------------
+    // ADS has to change the projection, not just the gun pose: aiming must shrink
+    // the world camera FOV by the weapon's zoom, and releasing must restore it.
+    // The harness evaluates synchronous bodies, so the hold is driven by real
+    // input state and polled through waitFor instead of sleeping in the page.
+    await client.evaluate(`
+      const g = window.__game;
+      const dbg = window.__gameDebug;
+      g.enemies.clear();
+      const held = g.weapons.current;
+      if (!held) return false;
+      held.adsZoom = 2.5;
+      window.__adsProbe = { fovBefore: g.camera.fov };
+      dbg.input.mouseButtons.add(2); // hold right mouse button
+      return true;
+    `, cap(6000));
+    const adsAiming = await client.waitFor('ADS to reach full zoom', `
+      const g = window.__game;
+      if (g.camera.fov > window.__adsProbe.fovBefore / 2.45) return null;
+      return {
+        blend: g.weapons.aimBlend, zoom: g.weapons.aimZoom, fov: g.camera.fov,
+        fovBefore: window.__adsProbe.fovBefore,
+        hudScoped: document.getElementById('hud').className.includes('aiming'),
+        overlayVisible: (document.getElementById('hud-ads').style.opacity || '0') > 0,
+      };
+    `, cap(6000));
+    await client.evaluate(`window.__gameDebug.input.mouseButtons.delete(2); return true;`);
+    const adsHip = await client.waitFor('ADS to release back to hip FOV', `
+      const g = window.__game;
+      if (g.weapons.aimBlend > 0.01 || Math.abs(g.camera.fov - window.__adsProbe.fovBefore) > 0.05) return null;
+      return {
+        blend: g.weapons.aimBlend, zoom: g.weapons.aimZoom, fov: g.camera.fov,
+        fovBefore: window.__adsProbe.fovBefore,
+        hudScoped: document.getElementById('hud').className.includes('aiming'),
+      };
+    `, cap(8000));
+    const adsWorks = Boolean(adsAiming) && Boolean(adsHip)
+      && adsAiming.zoom > 2.4
+      && adsAiming.fov < adsAiming.fovBefore * 0.45
+      && adsAiming.hudScoped === true
+      && adsAiming.overlayVisible === true
+      && adsHip.zoom <= 1.001
+      && Math.abs(adsHip.fov - adsHip.fovBefore) < 0.05
+      && adsHip.hudScoped === false;
+    check('aiming: ADS zooms the world camera, restores on release, drives the HUD overlay',
+      adsWorks, JSON.stringify({ aim: adsAiming, hip: adsHip }));
+
+    // ---- focus label ----------------------------------------------------------
+    // The enemy under the crosshair must expose its name and level so the player
+    // can tell what they are aiming at; the label rides its health bar.
+    const focusSpawn = await client.evaluate(`
+      const g = window.__game;
+      const dbg = window.__gameDebug;
+      const Vec = dbg.THREE.Vector3;
+      const em = g.enemies;
+      // Stand where the crosshair really has a clear shot: the spawn point sits
+      // next to a prop, so search the ring for a direction without cover.
+      const o = em.camera.position;
+      let dir = null;
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        const d = new Vec(Math.sin(a), 0, Math.cos(a));
+        if (!em.collision.raycast(o.clone(), d, 5.6)) { dir = d; break; }
+      }
+      if (!dir) return { blocked: true };
+      const spot = o.clone().addScaledVector(dir, 6);
+      spot.y = o.y;
+      em.spawnRandomAt(spot, g.player.level);
+      const enemy = em.enemies[em.enemies.length - 1];
+      if (!enemy) return null;
+      enemy.position.set(spot.x, g.controller.position.y, spot.z);
+      g.controller.yaw = Math.atan2(-dir.x, -dir.z);
+      g.controller.pitch = 0;
+      g.controller.updateCamera(0);
+      enemy.health = enemy.maxHealth * 0.7;
+      return { spawned: 1 };
+    `, cap(8000));
+    let focusLabel = await client.waitFor('a focus label with the enemy name and level', `
+      const shown = Array.from(document.querySelectorAll('#world-overlay .hpbar'))
+        .filter((el) => !el.classList.contains('hidden'));
+      const hit = shown.find((el) => {
+        const l = el.querySelector('.hpbar-label');
+        return l && !l.classList.contains('empty') && /LV \\d+/.test(l.textContent);
+      });
+      if (!hit) return null;
+      return {
+        text: hit.querySelector('.hpbar-label').textContent,
+        focused: hit.classList.contains('focused'),
+      };
+    `, cap(5000)).catch(() => null);
+    check('aiming: the enemy under the crosshair shows a name + level focus label',
+      Boolean(focusSpawn) && Boolean(focusLabel) && focusLabel.focused === true && /LV \d+/.test(focusLabel.text),
+      JSON.stringify({ focus: focusSpawn, label: focusLabel }));
     await client.evaluate('window.__game.enemies.clear(); return true;');
 
     // ---- performance: measure the cost of the animated rigs ----------------

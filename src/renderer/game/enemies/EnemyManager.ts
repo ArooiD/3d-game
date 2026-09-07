@@ -41,6 +41,7 @@ const ENGAGED = new Set(['alert', 'chase', 'attack', 'retreat']);
 const FOCUS_HOLD = 0.25;
 const FOCUS_DIR = new THREE.Vector3();
 const FOCUS_TO = new THREE.Vector3();
+const FOCUS_SAMPLES = [0.2, 0.45, 0.7, 0.92];
 
 export class EnemyManager {
   readonly enemies: Enemy[] = [];
@@ -296,37 +297,40 @@ export class EnemyManager {
   }
 
   /**
-   * The enemy the player is currently aiming at: the alive target whose body
-   * covers the crosshair ray with the smallest angular offset and which is not
-   * hidden behind cover. Held briefly after leaving the cone so the label does not
-   * strobe while tracking a moving target.
+   * The enemy the player is currently aiming at: the alive body whose bounding
+   * sphere comes closest to the crosshair ray while still touching it, and which
+   * is not hidden behind cover. Held briefly after leaving the aim so the label
+   * does not strobe while tracking a moving target.
    */
   private updateFocus(dt: number): Enemy | null {
     this.camera.getWorldDirection(FOCUS_DIR);
     const origin = this.camera.position;
     let best: Enemy | null = null;
-    let bestAngle = Number.POSITIVE_INFINITY;
-    let bestDist = 0;
+    let bestAlong = Number.POSITIVE_INFINITY;
     for (const enemy of this.enemies) {
       if (!enemy.alive) continue;
-      FOCUS_TO.set(enemy.position.x - origin.x, enemy.headY - 0.25 - origin.y, enemy.position.z - origin.z);
-      const dist = FOCUS_TO.length();
-      if (dist < 0.001) continue;
-      FOCUS_TO.divideScalar(dist);
-      const cos = THREE.MathUtils.clamp(FOCUS_TO.dot(FOCUS_DIR), -1, 1);
-      const angle = Math.acos(cos);
-      // Angular radius of the target, plus a small grace window so crosshair
-      // placement near an edge still counts as aiming at it.
-      const limit = Math.atan2(enemy.radius + 0.35, dist);
-      if (angle <= limit && angle < bestAngle) {
-        best = enemy;
-        bestAngle = angle;
-        bestDist = dist;
+      // The body is a vertical capsule; sample it so a crosshair anywhere between
+      // the feet and the head counts, which is what a label should mean. A single
+      // sphere at mid-height misses a level aim at a shorter target.
+      const reach = enemy.definition.radius + 0.2;
+      for (const frac of FOCUS_SAMPLES) {
+        FOCUS_TO.set(enemy.position.x - origin.x,
+          enemy.position.y + enemy.definition.height * frac - origin.y,
+          enemy.position.z - origin.z);
+        const along = FOCUS_TO.dot(FOCUS_DIR);
+        if (along <= 0.2) continue; // behind or on top of the eye
+        const distSq = FOCUS_TO.lengthSq();
+        const perp = Math.sqrt(Math.max(0, distSq - along * along));
+        if (perp <= reach && along < bestAlong) {
+          best = enemy;
+          bestAlong = along;
+          break;
+        }
       }
     }
     // The candidate must be shootable: cover between eye and target wins.
     if (best) {
-      const hit = this.collision.raycast(origin, FOCUS_DIR, bestDist - 0.4);
+      const hit = this.collision.raycast(origin, FOCUS_DIR, Math.max(0.5, bestAlong - 0.4));
       if (hit) best = null;
     }
     if (best) {

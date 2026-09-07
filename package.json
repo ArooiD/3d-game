@@ -11,7 +11,7 @@
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "npm run build && electron .",
-    "test:headless": "npm run build && node scripts/headless-test.mjs",
+    "test:headless": "node scripts/build.mjs --dev && node scripts/headless-test.mjs",
     "preview": "npm run build && electron .",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build && electron-builder",

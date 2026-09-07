@@ -4,6 +4,7 @@ import { buildGunModel, fitGunLength } from './game/weapons/WeaponModels';
 import { generateWeapon } from './game/weapons/WeaponGenerator';
 import { buildCharacterModel } from './game/player/CharacterModels';
 import { isDevelopment } from './game/core/SaveManager';
+import { input } from './game/core/Input';
 
 /**
  * Renderer entry point. Boots the game application and, if anything throws
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
         fitGunLength,
         generateWeapon,
         buildCharacterModel,
+        input,
       };
     }
     window.addEventListener('beforeunload', () => app.dispose());
