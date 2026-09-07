@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { humanLimb, humanTorso, addHumanFace } from '../player/HumanGeometry';
+import { humanHand, humanJoint, humanLimb, humanTorso, addHumanFace } from '../player/HumanGeometry';
 import type { EnemyBehavior, EnemyDefinition } from '../../../shared/types';
 import { MAX_ENEMY_LEVEL_SCALE } from '../../data/enemies/enemies';
 import { enemyLevelScale } from '../../../shared/constants';
@@ -63,13 +63,15 @@ const PROPORTIONS: Record<EnemyBehavior, Proportions> = {
   },
 };
 
-const unit = new RoundedBoxGeometry(1, 1, 1, 3, .09);
-const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
-const ring = new THREE.TorusGeometry(1, 0.06, 6, 20);
-/** Limb, skull and torso shapes: a hostile made of boxes reads as a moving crate. */
-const sphere = new THREE.SphereGeometry(0.5, 24, 16);
-const prism = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
-const dome = new THREE.SphereGeometry(0.5, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+// Equipment can stay stylised, but body-adjacent primitives use enough radial
+// segments that an enemy two metres from the camera no longer shows obvious
+// decagons around barrels, shoulders and armour rings.
+const unit = new RoundedBoxGeometry(1, 1, 1, 5, .12);
+const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 18);
+const ring = new THREE.TorusGeometry(1, 0.06, 10, 32);
+const sphere = new THREE.SphereGeometry(0.5, 32, 24);
+const prism = new THREE.CylinderGeometry(0.5, 0.5, 1, 40);
+const dome = new THREE.SphereGeometry(0.5, 32, 18, 0, Math.PI * 2, 0, Math.PI / 2);
 
 export interface BuiltEnemy {
   skeleton: Skeleton;
@@ -92,16 +94,25 @@ export class EnemyFactory {
 
   create(def: EnemyDefinition): BuiltEnemy {
     const source = PROPORTIONS[def.behavior] ?? PROPORTIONS.raider;
-    // Humanoid dimensions are fractions of standing height. The former values
-    // made the leg chain alone nearly a full body tall, burying the feet.
+    // Humanoid dimensions are fractions of standing height. Ordinary enemies use
+    // one coherent set of human proportions; archetypes change mass and equipment
+    // without turning limbs into disconnected sticks or the torso into stacked
+    // cylinders.
     const p: Proportions = def.behavior === 'boss' ? source : {
-      ...source, hipHeight: .53, torsoHeight: .27,
-      torsoWidth: def.behavior === 'heavy' ? .32 : .25,
-      torsoDepth: def.behavior === 'heavy' ? .20 : .15,
-      shoulderWidth: def.behavior === 'heavy' ? .35 : .28,
-      upperArm: .18, forearm: .16, limbThickness: .075,
-      thigh: .245, shin: .235, legThickness: .105,
-      headSize: .14, neckLength: .035,
+      ...source,
+      hipHeight: .53,
+      torsoHeight: .29,
+      torsoWidth: def.behavior === 'heavy' ? .34 : def.behavior === 'sniper' ? .235 : .26,
+      torsoDepth: def.behavior === 'heavy' ? .21 : .155,
+      shoulderWidth: def.behavior === 'heavy' ? .37 : def.behavior === 'sniper' ? .27 : .295,
+      upperArm: def.behavior === 'sniper' ? .19 : .18,
+      forearm: def.behavior === 'sniper' ? .18 : .17,
+      limbThickness: def.behavior === 'heavy' ? .09 : def.behavior === 'sniper' ? .062 : .072,
+      thigh: .245,
+      shin: .235,
+      legThickness: def.behavior === 'heavy' ? .125 : .102,
+      headSize: def.behavior === 'heavy' ? .145 : .14,
+      neckLength: .035,
     };
     const height = def.height;
     // Per-instance materials for anything that flashes on hit; shared ones are
@@ -131,16 +142,15 @@ export class EnemyFactory {
       const mesh = new THREE.Mesh(geometry, material);
       mesh.scale.set(w, h, d);
       mesh.position.set(x, y, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = false;
       parent.add(mesh);
       meshes.push(mesh);
       if (flash && (material === body || material === dark)) flashable.push(mesh);
       return mesh;
     };
 
-    /**
-     * Limb segment: a capsule spanning `length`, centred at `y`. The unit capsule
-     * is 2 units tall, so only the half-length goes into the vertical scale.
-     */
+    /** Organic limb segment spanning `length`, centred at `y`. */
     const limbShell = (
       parent: THREE.Object3D,
       thickness: number,
@@ -162,6 +172,7 @@ export class EnemyFactory {
       const mesh = new THREE.Mesh(cylinder, material);
       mesh.scale.set(radius * 2, length, radius * 2);
       mesh.position.set(x, y, z);
+      mesh.castShadow = true;
       parent.add(mesh);
       meshes.push(mesh);
       if (flash && (material === body || material === dark)) flashable.push(mesh);
@@ -208,26 +219,38 @@ export class EnemyFactory {
     const limb = p.limbThickness * height;
     const leg = p.legThickness * height;
 
-    // Scaling the octagon past 1 in depth gives a barrel chest from the front
-    // while leaving flat flanks for the plates to sit on.
-    shell(hips, torsoW * 0.92, torsoH * 0.3, torsoD * 1.15, 0, torsoH * 0.02, 0, dark, true, prism);
-    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 1.2, 0, torsoH * 0.22, 0, body, true, humanTorso);
-    shell(chest, torsoW, torsoH * 0.52, torsoD * 1.25, 0, torsoH * 0.16, 0, body, true, humanTorso);
-    shell(chest, torsoW * 0.72, torsoH * 0.22, torsoD * 0.42, 0, torsoH * 0.34, -torsoD * 0.6, trim);
+    // A continuous waist/rib/chest stack. The old three equally round volumes
+    // produced the orange "snowman" silhouette visible at close range.
+    shell(hips, torsoW * 0.88, torsoH * 0.25, torsoD * 1.02, 0, torsoH * 0.015, 0, dark, true, humanTorso);
+    shell(spine, torsoW * 0.92, torsoH * 0.58, torsoD * 1.04, 0, torsoH * 0.22, 0, body, true, humanTorso);
+    shell(chest, torsoW, torsoH * 0.66, torsoD * 1.08, 0, torsoH * 0.17, -torsoD * 0.015, body, true, humanTorso);
+
+    // Belt, fitted chest rig and collar create readable clothing layers without
+    // replacing the anatomy with boxes.
+    shell(hips, torsoW * 0.92, torsoH * 0.07, torsoD * 1.05, 0, -torsoH * 0.055, 0, trim, false, prism);
+    shell(chest, torsoW * 0.66, torsoH * 0.24, torsoD * 0.16, 0, torsoH * 0.22, -torsoD * 0.57, trim, false);
+    shell(chest, torsoW * 0.72, torsoH * 0.065, torsoD * 0.72, 0, torsoH * 0.39, -torsoD * 0.02, dark, false, prism);
 
     const headSize = p.headSize * height;
     const headShell = def.behavior === 'boss'
       ? shell(head, headSize, headSize, headSize * 0.95, 0, headSize * 0.44, 0, dark, true, sphere)
       : addHumanFace(head, headSize, def.behavior === 'rusher' ? 0xad8063 : 0xb48e72, meshes);
-    // The visor owns a per-instance material: it is the state/headshot lamp.
+
+    // The state lamp is now a real front visor rather than a tiny floating orb on
+    // the temple. It follows the animated head and is still independently tintable.
     const indicatorMaterial = (accent as THREE.MeshLambertMaterial).clone();
-    const indicatorShell = new THREE.Mesh(sphere, indicatorMaterial);
-    indicatorShell.scale.set(headSize * 0.8, headSize * 0.22, headSize * 0.3);
-    indicatorShell.position.set(headSize * .46, headSize * 0.65, 0);
-    indicatorShell.scale.set(headSize * .12, headSize * .12, headSize * .12);
+    const indicatorShell = new THREE.Mesh(unit, indicatorMaterial);
+    indicatorShell.scale.set(headSize * .52, headSize * .085, headSize * .055);
+    indicatorShell.position.set(0, headSize * .57, -headSize * .43);
+    indicatorShell.rotation.x = -0.04;
+    indicatorShell.castShadow = true;
     head.add(indicatorShell);
     meshes.push(indicatorShell);
-    shell(head, headSize * 0.92, headSize * 0.3, headSize * 0.88, 0, headSize * 0.84, 0, trim, false, dome);
+
+    // Close-fitting helmet/cap and neck guard: rounded enough to keep the head
+    // human while giving archetypes a hostile combat silhouette.
+    shell(head, headSize * 0.91, headSize * 0.24, headSize * 0.88, 0, headSize * 0.86, headSize * .03, trim, false, dome);
+    shell(neck, torsoW * .31, headSize * .17, torsoD * .48, 0, headSize * .055, 0, trim, false, prism);
 
     for (const side of [-1, 1] as const) {
       const tag = side < 0 ? 'L' : 'R';
@@ -238,17 +261,41 @@ export class EnemyFactory {
       const shinBone = skeleton.bones.get(`shin${tag}`)!;
       const footBone = skeleton.bones.get(`foot${tag}`)!;
 
-      shell(shoulderBone, limb * 1.7, limb * 1.5, limb * 1.7, 0, limb * 0.1, 0, body, true, dome);
+      // Rounded shoulder cap transitions into an organic upper arm.
+      shell(shoulderBone, limb * 1.72, limb * 1.38, limb * 1.72, 0, limb * 0.08, 0, body, true, dome);
       limbShell(armBone, limb, p.upperArm * height, -p.upperArm * height * 0.5, body);
-      shell(armBone, limb * 0.85, limb * 0.85, limb * 0.85, 0, -p.upperArm * height, 0, trim, false, sphere);
-      limbShell(forearmBone, limb * 0.9, p.forearm * height, -p.forearm * height * 0.5, dark);
-      shell(forearmBone, limb * 1.1, limb * 0.7, limb * 1.1, 0, -p.forearm * height * 0.94, 0, trim, false);
+      shell(armBone, limb * .88, limb * .82, limb * .88, 0, -p.upperArm * height, 0, trim, false, humanJoint);
+      limbShell(forearmBone, limb * 0.92, p.forearm * height, -p.forearm * height * 0.5, dark);
+
+      // A tapered glove replaces the old rectangular block at the end of every
+      // forearm. Boss weapons are integrated into the arms, so they keep their
+      // mechanical end-caps instead.
+      if (def.behavior !== 'boss') {
+        const handMesh = shell(
+          forearmBone,
+          limb * 1.06,
+          limb * .88,
+          limb * .96,
+          0,
+          -p.forearm * height * 1.04,
+          -limb * .035,
+          trim,
+          false,
+          humanHand,
+        );
+        handMesh.rotation.x = -0.08;
+      } else {
+        shell(forearmBone, limb * 1.08, limb * .72, limb * 1.08, 0, -p.forearm * height * 0.96, 0, trim, false, humanJoint);
+      }
 
       limbShell(thighBone, leg, p.thigh * height, -p.thigh * height * 0.5, dark);
-      shell(thighBone, leg * 0.9, leg * 0.9, leg * 0.9, 0, -p.thigh * height, 0, trim, false, sphere);
-      limbShell(shinBone, leg * 0.88, p.shin * height, -p.shin * height * 0.5, dark);
-      // Boot, wider and pushed forward so the stance reads from the side.
-      shell(footBone, leg * 1.05, leg * 0.45, leg * 1.9, 0, -leg * 0.18, -leg * 0.4, trim, false, prism);
+      shell(thighBone, leg * .96, leg * .86, leg * .96, 0, -p.thigh * height, 0, trim, false, humanJoint);
+      limbShell(shinBone, leg * 0.9, p.shin * height, -p.shin * height * 0.5, dark);
+      // Curved kneepad and shin guard add form while keeping the leg silhouette
+      // smooth. The boot is a rounded box, not an extruded polygonal cylinder.
+      shell(shinBone, leg * .78, p.shin * height * .31, leg * .48, 0, -p.shin * height * .34, -leg * .35, body, false, dome);
+      shell(footBone, leg * 1.04, leg * 0.48, leg * 1.86, 0, -leg * 0.18, -leg * 0.42, trim, false, unit);
+      shell(footBone, leg * .84, leg * .18, leg * .72, 0, -leg * .17, -leg * 1.02, dark, false, dome);
     }
 
     // ------------------------------------------------------- archetype props
@@ -271,8 +318,8 @@ export class EnemyFactory {
         tube(gunRoot, gunBody * 0.42, gunLength * 0.5, gunBody * 0.5, -forearmLength * 0.98, -gunLength * 0.55, dark, false);
         tube(gunRoot, gunBody * 0.42, gunLength * 0.5, -gunBody * 0.5, -forearmLength * 0.98, -gunLength * 0.55, dark, false);
       }
-      // Support hand resting on the foregrip.
-      shell(skeleton.bones.get('forearmL')!, limb * 1.1, limb, limb * 1.1, 0, -forearmLength * 0.9, -gunLength * 0.3, trim, false);
+      // No detached support-hand prop here: the animated left arm now ends in a
+      // real rounded glove and the two-handed carry pose places it at the foregrip.
       muzzle.position.set(0, -forearmLength * 0.98, -gunLength * 1.12);
       gunRoot.add(muzzle);
     }
@@ -285,8 +332,8 @@ export class EnemyFactory {
         const spike = shell(shoulderBone, limb * 0.5, limb * 1.5, limb * 0.5, side * p.shoulderWidth * height * 0.16, limb * 0.9, 0, accent, false);
         spike.rotation.z = side * 0.5;
         for (let i = 0; i < 3; i++) {
-          const claw = shell(forearmBone, limb * 0.22, limb * 1.5, limb * 0.22, (i - 1) * limb * 0.5, -forearmLength * 1.35, -limb * 0.35, dark, false);
-          claw.rotation.x = -0.45;
+          const claw = shell(forearmBone, limb * 0.18, limb * 1.35, limb * 0.18, (i - 1) * limb * 0.42, -forearmLength * 1.24, -limb * 0.55, dark, false, cylinder);
+          claw.rotation.x = -0.62;
         }
       }
       shell(chest, torsoW * 0.5, torsoH * 0.3, torsoD * 0.3, 0, torsoH * 0.1, torsoD * 0.52, accent, false);
@@ -295,24 +342,33 @@ export class EnemyFactory {
     }
 
     if (def.behavior === 'heavy') {
-      shell(chest, torsoW * 1.16, torsoH * 0.42, torsoD * 1.14, 0, torsoH * 0.2, 0, accent, false);
+      // Heavy armour follows the underlying anatomy instead of replacing the
+      // complete chest with one huge rectangular shell.
+      shell(chest, torsoW * 1.08, torsoH * 0.32, torsoD * 1.08, 0, torsoH * 0.19, -torsoD * .02, accent, false, humanTorso);
       for (const side of [-1, 1] as const) {
         const shoulderBone = skeleton.bones.get(side < 0 ? 'shoulderL' : 'shoulderR')!;
-        shell(shoulderBone, limb * 2.5, limb * 1.5, limb * 2.2, 0, limb * 0.5, 0, body);
+        shell(shoulderBone, limb * 2.2, limb * 1.18, limb * 2.05, 0, limb * 0.42, 0, body, false, dome);
+        shell(shoulderBone, limb * 2.05, limb * .22, limb * 1.92, 0, limb * .3, -limb * .08, accent, false, dome);
       }
-      shell(spine, torsoW * 0.7, torsoH * 0.6, torsoD * 0.55, 0, torsoH * 0.1, torsoD * 0.62, trim, false);
-      tube(spine, torsoW * 0.22, torsoH * 0.5, 0, torsoH * 0.1, torsoD * 0.62, accent, false);
+      shell(spine, torsoW * 0.64, torsoH * 0.5, torsoD * 0.5, 0, torsoH * 0.1, torsoD * 0.6, trim, false);
+      tube(spine, torsoW * 0.19, torsoH * 0.45, 0, torsoH * 0.1, torsoD * 0.62, accent, false);
     }
 
     if (def.behavior === 'sniper') {
-      shell(spine, torsoW * 0.6, torsoH * 0.22, torsoD * 0.5, 0, torsoH * 0.02, torsoD * 0.6, trim, false);
-      const antenna = tube(chest, height * 0.008, height * 0.5, p.shoulderWidth * height * 0.3, height * 0.24, torsoD * 0.2, dark, false);
+      // Slim harness, high collar and sensor mast keep the sniper distinct without
+      // exaggerating the base body into another blocky silhouette.
+      shell(spine, torsoW * 0.58, torsoH * 0.18, torsoD * 0.46, 0, torsoH * 0.02, torsoD * 0.58, trim, false);
+      shell(chest, torsoW * .62, torsoH * .08, torsoD * .62, 0, torsoH * .35, -torsoD * .02, accent, false, prism);
+      const antenna = tube(chest, height * 0.007, height * 0.42, p.shoulderWidth * height * 0.3, height * 0.21, torsoD * 0.2, dark, false);
       antenna.rotation.z = -0.2;
     }
 
     if (def.behavior === 'raider') {
-      shell(hips, torsoW * 0.4, torsoH * 0.2, torsoD * 0.5, -torsoW * 0.4, -torsoH * 0.02, 0, trim, false);
-      shell(spine, torsoW * 0.62, torsoH * 0.44, torsoD * 0.4, 0, torsoH * 0.16, torsoD * 0.6, trim, false);
+      // Asymmetric scavenger kit: hip pouch, chest satchel and one shoulder plate.
+      shell(hips, torsoW * 0.28, torsoH * 0.2, torsoD * 0.42, -torsoW * 0.43, -torsoH * 0.02, -torsoD * .05, trim, false);
+      shell(spine, torsoW * 0.5, torsoH * 0.36, torsoD * 0.3, 0, torsoH * 0.15, torsoD * 0.58, trim, false);
+      const shoulderR = skeleton.bones.get('shoulderR')!;
+      shell(shoulderR, limb * 1.95, limb * .82, limb * 1.8, 0, limb * .32, -limb * .08, accent, false, dome);
     }
 
     if (def.behavior === 'boss') {
@@ -404,6 +460,8 @@ export class EnemyFactory {
         meshes.length = 0;
         flashable.length = 0;
         // Only instance-owned materials are disposed; shared ones stay cached.
+        body.dispose();
+        dark.dispose();
         indicatorMaterial.dispose();
         if (shieldRing) (shieldRing.material as THREE.Material).dispose();
         skeleton.dispose();
