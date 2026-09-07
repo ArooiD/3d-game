@@ -14,7 +14,6 @@
     "test:headless": "npm run build && node scripts/headless-test.mjs",
     "preview": "npm run build && electron ."
   },
-  "author": "OpenHands",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.4.1",

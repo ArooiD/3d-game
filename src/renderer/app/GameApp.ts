@@ -1243,6 +1243,7 @@ export class GameApp {
     window.removeEventListener('resize', this.resizeHandler);
     bus.offOwner(this);
     this.hud.dispose();
+    this.screens.dispose();
     this.lootTooltip.dispose();
     this.inventoryUI.dispose();
     this.skillsUI.dispose();

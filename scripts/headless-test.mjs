@@ -44,11 +44,11 @@ class Abort extends Error {}
 
 let app = null;
 let client = null;
+let userDataDir = null;
 
 // ----------------------------------------------------------------- reporting
 
 const checks = [];
-const notes = [];
 
 function check(name, passed, detail = '') {
   checks.push({ name, passed: Boolean(passed), detail });
@@ -57,13 +57,12 @@ function check(name, passed, detail = '') {
 }
 
 function note(message) {
-  notes.push(message);
   console.log(`  · ${message}`);
 }
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 /** Clamp a step timeout to whatever is left in the global budget. */
-const cap = (ms) => Math.max(500, Math.min(DEADLINE - Date.now() - 2500, ms));
+const cap = (ms) => Math.max(300, Math.min(DEADLINE - Date.now() - 1000, ms));
 
 // ------------------------------------------------------------------- CDP client
 
@@ -369,7 +368,7 @@ async function run() {
     if (!existsSync(join(ROOT, artifact))) throw new Abort(`${artifact} is missing - run \`node scripts/build.mjs --dev\` first`);
   }
 
-  const userDataDir = mkdtempSync(join(tmpdir(), 'dustfall-smoke-'));
+  userDataDir = mkdtempSync(join(tmpdir(), 'dustfall-smoke-'));
   try {
     note(`launching electron: ${USE_HEADLESS_FLAG ? '--headless=new ' : ''}--remote-debugging-port=${PORT} --no-sandbox (under xvfb-run -a)`);
     app = spawnApp(userDataDir);
@@ -501,6 +500,7 @@ async function run() {
       note(`electron stopped (code=${app.exitCode} signal=${app.signalCode ?? 'none'})`);
     }
     rmSync(userDataDir, { recursive: true, force: true });
+    userDataDir = null;
   }
 }
 
@@ -520,42 +520,50 @@ function dumpDiagnostics(reason) {
   }
 }
 
-function summarize() {
+function summarize(aborted = false) {
   const failed = checks.filter((entry) => !entry.passed);
+  const ok = !aborted && failed.length === 0 && checks.length > 0;
   console.log('='.repeat(72));
-  console.log(`RESULT: ${checks.length - failed.length}/${checks.length} checks passed`);
+  console.log(`RESULT: ${checks.length - failed.length}/${checks.length} checks passed${aborted ? ' - flow ABORTED' : ''}`);
   for (const entry of failed) console.log(`  FAILED: ${entry.name}${entry.detail ? ` -> ${entry.detail}` : ''}`);
   console.log('='.repeat(72));
-  return failed.length === 0 && checks.length > 0 ? 0 : 1;
+  return ok ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------- driver
 
-let finished = false;
+let finishing = false;
 
-async function finish(reason) {
-  if (finished) return;
-  finished = true;
-  if (reason) {
-    dumpDiagnostics(reason);
-    clearTimeout(watchdog);
-  }
-  const status = summarize();
+/** Kill the app, print the summary and exit; safe to call more than once. */
+async function finish(passed, reason) {
+  if (finishing) return;
+  finishing = true;
+  clearTimeout(watchdog);
+  if (reason) dumpDiagnostics(reason);
+
   client?.close();
+  if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
   if (app) await killApp(app);
-  process.exit(status);
+  process.exit(summarize(!passed));
 }
 
+// Hard backstop: if the flow ever hangs past the budget, still make noise and
+// exit non-zero rather than reporting a clean run.
 const watchdog = setTimeout(() => {
-  void finish(`overall timeout of ${BUDGET_MS}ms exceeded`);
+  if (finishing) return;
+  client?.close();
+  if (app) void killApp(app);
+  if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
+  console.error(`ABORTED: overall timeout of ${BUDGET_MS}ms exceeded`);
+  process.exit(1);
 }, BUDGET_MS);
 
 try {
   await run();
-  await finish();
+  await finish(true);
 } catch (error) {
   const isAbort = error instanceof Abort;
   const reason = isAbort ? error.message : (error instanceof Error ? (error.stack ?? error.message) : String(error));
   if (!isAbort) check('smoke flow completed without aborting', false, reason.split('\n')[0]);
-  await finish(reason);
+  await finish(false, reason);
 }

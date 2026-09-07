@@ -1,6 +1,8 @@
 import type { CharacterId, SettingsState } from '../../../shared/types';
 import { CHARACTER_LIST, ACTIVE_SKILLS } from '../../data/characters/characters';
 import { audio } from '../../game/audio/AudioSystem';
+import { bus } from '../../game/core/EventBus';
+import { AppState, type AppStateName } from '../../game/core/StateManager';
 import { byId, clear, formatTime, make, show } from '../dom';
 
 /**
@@ -87,9 +89,29 @@ export class ScreensUI {
   ) {
     this.buildCharacterCards();
     this.bindButtons();
+    this.bindStateChanges();
   }
 
   // ------------------------------------------------------------- visibility
+
+  /**
+   * Full-screen panels are owned by whatever opened them, but gameplay can
+   * resume from several of them (loading finished, respawn, resume, keep
+   * playing) without going through a show*() call. Listening for the transitions
+   * back into the un-obscured states keeps a panel from being left over the live
+   * world.
+   */
+  private bindStateChanges(): void {
+    bus.on('state:changed', (payload: { to: AppStateName }) => {
+      if (payload.to === AppState.Playing || payload.to === AppState.Inventory || payload.to === AppState.Skills) {
+        this.hideAll();
+      }
+    }, this);
+  }
+
+  dispose(): void {
+    bus.offOwner(this);
+  }
 
   hideAll(): void {
     for (const node of [this.menu, this.select, this.loading, this.pause, this.settings, this.gameover, this.victory]) {
