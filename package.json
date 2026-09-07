@@ -1,0 +1,30 @@
+{
+  "name": "dustfall-outpost",
+  "productName": "Dustfall Outpost",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A single-player 3D looter-shooter vertical slice built with Electron, TypeScript and Three.js.",
+  "main": "dist/electron/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron .",
+    "test:headless": "npm run build && node scripts/headless-test.mjs",
+    "preview": "npm run build && electron ."
+  },
+  "author": "OpenHands",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/three": "^0.171.0",
+    "electron": "^33.2.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  },
+  "dependencies": {
+    "three": "^0.171.0"
+  }
+}

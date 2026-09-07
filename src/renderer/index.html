@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dustfall Outpost</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="viewport"></div>
+
+    <!-- Floating damage numbers and world-space markers are projected here. -->
+    <div id="world-overlay"></div>
+
+    <div id="hud" class="hidden">
+      <div id="hud-objective" class="hud-objective">
+        <div class="objective-label">OBJECTIVE</div>
+        <div id="objective-text">—</div>
+        <div id="objective-progress" class="objective-progress"></div>
+      </div>
+
+      <div id="hud-crosshair" class="crosshair">
+        <span class="ch ch-t"></span><span class="ch ch-b"></span>
+        <span class="ch ch-l"></span><span class="ch ch-r"></span>
+        <i id="hitmarker" class="hitmarker"></i>
+      </div>
+
+      <div id="hud-interact" class="interact-prompt hidden">
+        <b>E</b><span id="interact-label">Pick up</span>
+      </div>
+
+      <div id="hud-vitals" class="vitals">
+        <div class="vitals-head">
+          <span id="vitals-name">VANGUARD</span>
+          <span class="level-badge">LV <b id="vitals-level">1</b></span>
+        </div>
+        <div class="bar bar-shield"><i id="bar-shield"></i><span id="text-shield">50</span></div>
+        <div class="bar bar-health"><i id="bar-health"></i><span id="text-health">100</span></div>
+        <div class="bar bar-xp"><i id="bar-xp"></i><span id="text-xp">0 / 100 XP</span></div>
+      </div>
+
+      <div id="hud-abilities" class="abilities">
+        <div class="ability" id="ability-f">
+          <span class="ability-key">F</span>
+          <span class="ability-name" id="ability-f-name">Overdrive</span>
+          <i class="ability-cd" id="ability-f-cd"></i>
+        </div>
+        <div class="ability" id="ability-q">
+          <span class="ability-key">Q</span>
+          <span class="ability-name" id="ability-q-name">Grenade</span>
+          <i class="ability-cd" id="ability-q-cd"></i>
+        </div>
+      </div>
+
+      <div id="hud-weapon" class="weapon-panel">
+        <div class="weapon-name" id="weapon-name">Rusty Sidearm</div>
+        <div class="weapon-type" id="weapon-type">PISTOL · COMMON</div>
+        <div class="ammo"><b id="ammo-mag">12</b><span id="ammo-reserve">/ 96</span></div>
+        <div class="reload-hint hidden" id="reload-hint">RELOADING…</div>
+        <div class="weapon-slots" id="weapon-slots"></div>
+      </div>
+
+      <div id="hud-boss" class="boss-bar hidden">
+        <div class="boss-name" id="boss-name">SCRAP TITAN</div>
+        <div class="bar bar-boss-shield"><i id="bar-boss-shield"></i></div>
+        <div class="bar bar-boss-health"><i id="bar-boss-health"></i></div>
+      </div>
+
+      <div id="hud-notifications" class="notifications"></div>
+      <div id="hud-damage-flash" class="damage-flash"></div>
+      <div id="hud-vignette" class="vignette"></div>
+    </div>
+
+    <!-- Level-up banner sits above most panels but under menus. -->
+    <div id="levelup-banner" class="levelup-banner hidden">
+      <div class="levelup-title">LEVEL <b id="levelup-level">2</b></div>
+      <div class="levelup-sub" id="levelup-sub">+1 SKILL POINT · VITALS RESTORED</div>
+      <div class="levelup-hint">press K to spend</div>
+    </div>
+
+    <div id="ui-menu" class="screen hidden">
+      <div class="menu-brand">
+        <h1>DUSTFALL<span>OUTPOST</span></h1>
+        <p class="menu-tag">a salvage run gone loud</p>
+      </div>
+      <div class="menu-body">
+        <div class="menu-buttons">
+          <button class="btn btn-primary" data-action="new-game">NEW GAME</button>
+          <button class="btn" data-action="continue" id="btn-continue">CONTINUE</button>
+          <button class="btn" data-action="character">CHARACTER</button>
+          <button class="btn" data-action="settings">SETTINGS</button>
+          <button class="btn btn-danger" data-action="exit">EXIT</button>
+        </div>
+        <div id="menu-detail" class="menu-detail"></div>
+      </div>
+      <div class="menu-foot">v0.1 vertical slice · all content original</div>
+    </div>
+
+    <div id="ui-select" class="screen hidden">
+      <h2 class="screen-title">CHOOSE YOUR OPERATOR</h2>
+      <div class="select-grid" id="select-grid"></div>
+      <div class="select-actions">
+        <button class="btn btn-primary" data-action="select-confirm" id="btn-select-confirm" disabled>
+          DEPLOY
+        </button>
+        <button class="btn" data-action="select-back">BACK</button>
+      </div>
+    </div>
+
+    <div id="ui-loading" class="screen screen-loading hidden">
+      <div class="loading-title" id="loading-title">DEPLOYING</div>
+      <div class="loading-bar"><i id="loading-bar"></i></div>
+      <div class="loading-step" id="loading-step">allocating buffers…</div>
+      <div class="loading-tip" id="loading-tip"></div>
+    </div>
+
+    <div id="ui-inventory" class="panel hidden">
+      <div class="panel-head">
+        <h2>INVENTORY</h2>
+        <div class="panel-hint">TAB close · click item to inspect · [E] equip · [X] drop · [DEL] destroy</div>
+      </div>
+      <div class="inv-body">
+        <div class="inv-character" id="inv-character"></div>
+        <div class="inv-right">
+          <div class="inv-section-label">EQUIPPED <span>(1–3)</span></div>
+          <div class="inv-equipped" id="inv-equipped"></div>
+          <div class="inv-section-label">BACKPACK <span id="inv-count">0 / 20</span></div>
+          <div class="inv-grid" id="inv-grid"></div>
+        </div>
+        <div class="inv-detail" id="inv-detail"></div>
+      </div>
+    </div>
+
+    <div id="ui-skills" class="panel hidden">
+      <div class="panel-head">
+        <h2>SKILL TREE</h2>
+        <div class="panel-hint">K close · <b id="skills-points">0</b> points available</div>
+      </div>
+      <div class="skills-body" id="skills-body"></div>
+    </div>
+
+    <div id="ui-pause" class="screen screen-dim hidden">
+      <h2 class="screen-title">PAUSED</h2>
+      <div class="pause-stats" id="pause-stats"></div>
+      <div class="menu-buttons">
+        <button class="btn btn-primary" data-action="resume">RESUME</button>
+        <button class="btn" data-action="pause-settings">SETTINGS</button>
+        <button class="btn" data-action="save-now">SAVE GAME</button>
+        <button class="btn" data-action="main-menu">MAIN MENU</button>
+        <button class="btn btn-danger" data-action="exit">EXIT</button>
+      </div>
+    </div>
+
+    <div id="ui-settings" class="screen screen-dim hidden">
+      <h2 class="screen-title">SETTINGS</h2>
+      <div class="settings-body" id="settings-body"></div>
+      <div class="menu-buttons">
+        <button class="btn btn-primary" data-action="settings-back">APPLY &amp; CLOSE</button>
+      </div>
+    </div>
+
+    <div id="ui-gameover" class="screen screen-dim hidden">
+      <h2 class="screen-title screen-title-danger">YOU DIED</h2>
+      <p class="gameover-sub" id="gameover-sub">The outpost keeps its salvage.</p>
+      <div class="menu-buttons">
+        <button class="btn btn-primary" data-action="respawn">RESPAWN AT CAMP</button>
+        <button class="btn" data-action="main-menu">MAIN MENU</button>
+      </div>
+    </div>
+
+    <div id="ui-victory" class="screen screen-dim hidden">
+      <h2 class="screen-title screen-title-good">OUTPOST CLEARED</h2>
+      <div class="victory-body" id="victory-body"></div>
+      <div class="menu-buttons">
+        <button class="btn btn-primary" data-action="victory-keep">KEEP PLAYING</button>
+        <button class="btn" data-action="main-menu">MAIN MENU</button>
+      </div>
+    </div>
+
+    <div id="ui-debug" class="debug hidden"></div>
+    <div id="ui-toast" class="toast-layer"></div>
+
+    <div id="ui-error" class="screen screen-dim hidden">
+      <h2 class="screen-title screen-title-danger">RUNTIME ERROR</h2>
+      <pre id="ui-error-text"></pre>
+      <div class="menu-buttons">
+        <button class="btn btn-primary" data-action="reload">RELOAD</button>
+      </div>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
