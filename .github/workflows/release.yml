@@ -64,6 +64,10 @@ jobs:
       - name: Generate app icon
         run: node scripts/make-icon.mjs
 
+      # electron-builder only packages dist/; the bundle must exist first.
+      - name: Build app bundle
+        run: npm run build
+
       # --publish never keeps fork PRs and branch runs artifact-only; only a
       # tag push (or an explicit choice from workflow_dispatch) can publish,
       # because that is the only case where contents:write is meaningful.
