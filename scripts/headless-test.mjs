@@ -473,19 +473,22 @@ async function run() {
     check('trace: LOADING observed between CHARACTER_SELECT and PLAYING', trace.includes('ui-loading'), `trace=${JSON.stringify(trace)}`);
     check('trace: all full-screen panels hidden while playing', end === 'HUD', `visible panels now: ${end}`);
 
+    // Just prove frames keep arriving. The budget is deliberately loose: under
+    // swiftshader the first frames after the world loads compile shaders and a
+    // single one can take a second, so a 60 FPS expectation flakes in CI.
     const frames = await client.waitFor('the render loop to keep ticking', `
       const started = performance.now();
       return new Promise((done) => {
         let n = 0;
         const tick = () => {
           n += 1;
-          if (n >= 10) done(true);
-          else if (performance.now() - started > 2500) done(false);
+          if (n >= 3) done(true);
+          else if (performance.now() - started > 5000) done(false);
           else requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
       });
-    `, cap(6000));
+    `, cap(12000));
     check('engine: requestAnimationFrame loop is running', frames === true);
 
     const stateNow = await client.evaluate('const g = window.__game; g.reportDebug(); return g.debug.__smokeState;');
