@@ -98,7 +98,7 @@ export class LootSystem {
     questItem?: boolean;
     targetId?: string;
   }): LootItem {
-    const visual = createLootVisual(options.rarity);
+    const visual = createLootVisual(options.rarity, options.weapon ?? null);
     const ground = this.groundY(options.position.x, options.position.z);
     const position = new THREE.Vector3(options.position.x, ground + 0.35, options.position.z);
     visual.group.position.copy(position);
@@ -226,9 +226,8 @@ export class LootSystem {
         item.visual.group.visible = !(item.ttl < 6 && Math.sin(item.ttl * 12) > 0);
       }
 
-      // Spin the gem, bob the whole pickup.
-      const gem = item.visual.group.children[1];
-      if (gem) gem.rotation.y += dt * 1.7;
+      // Spin the gun/gem, bob the whole pickup.
+      item.visual.spinner.rotation.y += dt * 1.7;
       item.visual.group.position.y = item.position.y + Math.sin(this.time * 2 + item.position.x) * 0.07;
 
       const flat = Math.hypot(item.position.x - playerPosition.x, item.position.z - playerPosition.z);

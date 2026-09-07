@@ -1,4 +1,8 @@
 import { GameApp } from './app/GameApp';
+import * as THREE from 'three';
+import { buildGunModel, fitGunLength } from './game/weapons/WeaponModels';
+import { generateWeapon } from './game/weapons/WeaponGenerator';
+import { isDevelopment } from './game/core/SaveManager';
 
 /**
  * Renderer entry point. Boots the game application and, if anything throws
@@ -24,6 +28,15 @@ async function main(): Promise<void> {
   try {
     const app = new GameApp();
     (window as unknown as { __game?: GameApp }).__game = app;
+    // Dev-only helpers for the headless harness; stripped from production builds.
+    if (isDevelopment()) {
+      (window as unknown as Record<string, unknown>).__gameDebug = {
+        THREE,
+        buildGunModel,
+        fitGunLength,
+        generateWeapon,
+      };
+    }
     window.addEventListener('beforeunload', () => app.dispose());
     await app.boot();
   } catch (error) {

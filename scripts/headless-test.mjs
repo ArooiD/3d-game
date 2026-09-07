@@ -618,6 +618,170 @@ async function run() {
       JSON.stringify(perf));
 
 
+    // ---- weapon models: procedural guns must be real, distinct and finite ---
+    const gunReport = await client.evaluate(`
+      const dbg = window.__gameDebug;
+      const Vec = dbg.THREE.Vector3;
+      const stats = (node) => {
+        let meshes = 0;
+        let bad = 0;
+        node.traverse((child) => {
+          if (!child.isMesh) return;
+          meshes += 1;
+          const p = child.getWorldPosition(new Vec());
+          if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) bad += 1;
+        });
+        return { meshes, bad };
+      };
+      const types = ['pistol', 'assault_rifle', 'shotgun', 'sniper_rifle', 'smg'];
+      const rows = [];
+      for (const weaponType of types) {
+        const weapon = dbg.generateWeapon({ type: weaponType, level: 5, rarity: 'legendary', luck: 1 });
+        const model = dbg.buildGunModel(weapon, { detail: 'high', hands: true });
+        dbg.fitGunLength(model, 0.62);
+        const probe = new (dbg.THREE.Group)();
+        probe.add(model.group);
+        probe.updateMatrixWorld(true);
+        const overall = stats(probe);
+        rows.push({
+          type: weaponType,
+          meshes: overall.meshes,
+          bad: overall.bad,
+          muzzle: Boolean(model.muzzle),
+          mag: Boolean(model.magazine),
+          bolt: Boolean(model.bolt),
+          slide: Boolean(model.slide),
+        });
+        model.dispose();
+      }
+      const plain = dbg.buildGunModel(
+        dbg.generateWeapon({ type: 'pistol', level: 1, rarity: 'common' }), { detail: 'high' });
+      const plainProbe = new (dbg.THREE.Group)();
+      plainProbe.add(plain.group);
+      plainProbe.updateMatrixWorld(true);
+      const plainMeshes = stats(plainProbe).meshes;
+      plain.dispose();
+      return { rows, plainMeshes };
+    `, cap(15000));
+    const gunRows = gunReport ? gunReport.rows : [];
+    const gunOk = gunRows.length === 5
+      && gunRows.every((row) => row.meshes >= 14 && row.bad === 0
+        && row.muzzle && row.mag && row.bolt)
+      && gunRows.some((row) => row.type === 'shotgun' && row.slide);
+    check('weapons: every archetype builds a finite multi-part gun model', gunOk,
+      JSON.stringify(gunRows.map((row) => row.type + ':' + row.meshes + (row.bad ? '/BAD' : ''))));
+    const richest = gunReport ? Math.max(...gunReport.rows.map((row) => row.meshes)) : 0;
+    check('weapons: rolled modifiers add visible geometry over a plain common',
+      Boolean(gunReport) && richest > gunReport.plainMeshes,
+      'best ' + richest + ' vs common ' + (gunReport ? gunReport.plainMeshes : 'n/a'));
+
+    // The viewmodel must be parented to the camera, and the muzzle anchor the
+    // tracers spawn from must sit on the barrel rather than at the camera.
+    const muzzleReport = await client.evaluate(`
+      const g = window.__game;
+      const dbg = window.__gameDebug;
+      const Vec = dbg.THREE.Vector3;
+      let muzzleNode = null;
+      let meshes = 0;
+      let bad = 0;
+      g.camera.traverse((child) => {
+        if (child.name === 'muzzle') muzzleNode = child;
+        if (!child.isMesh) return;
+        meshes += 1;
+        const p = child.getWorldPosition(new Vec());
+        if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) bad += 1;
+      });
+      const anchor = g.weapons.muzzleWorld(new Vec());
+      g.camera.updateMatrixWorld(true);
+      g.weapons.update(0.001, {
+        damageMultiplier: 1, fireRateMultiplier: 1, spreadMultiplier: 1,
+        criticalChance: 0, criticalMultiplier: 2, reloadTimeMultiplier: 1,
+      }, { fireHeld: false, firePressed: false, aiming: false });
+      g.weapons.muzzleWorld(anchor);
+      const muzzlePos = muzzleNode ? muzzleNode.getWorldPosition(new Vec()) : new Vec();
+      const offset = anchor.clone().sub(muzzlePos);
+      const forward = new Vec(0, 0, -1).applyQuaternion(g.camera.quaternion);
+      const inHand = g.camera.getWorldPosition(new Vec()).distanceTo(anchor);
+      return {
+        muzzleNode: muzzleNode ? 1 : 0, meshes, bad,
+        offsetLength: offset.length(),
+        alongForward: offset.clone().normalize().dot(forward),
+        inHand,
+      };
+    `, cap(12000));
+    // Anchor is the barrel tip pushed 0.28 m down the view axis.
+    check('weapons: viewmodel gun is mounted in-hand with a barrel-locked muzzle anchor',
+      Boolean(muzzleReport) && muzzleReport.muzzleNode === 1 && muzzleReport.bad === 0
+      && muzzleReport.meshes > 12
+      && Math.abs(muzzleReport.offsetLength - 0.28) < 0.02
+      && muzzleReport.alongForward > 0.99
+      && muzzleReport.inHand > 0.3 && muzzleReport.inHand < 2,
+      JSON.stringify(muzzleReport));
+
+    const lootGunReport = await client.evaluate(`
+      const g = window.__game;
+      const dbg = window.__gameDebug;
+      const Vec = g.controller.position.constructor;
+      const origin = g.controller.position.clone();
+      const drop = g.loot.dropWeapon(
+        dbg.generateWeapon({ type: 'shotgun', level: 4, rarity: 'epic', luck: 1 }),
+        new Vec(origin.x + 1.5, origin.y, origin.z - 2.5));
+      let barrels = 0;
+      let bad = 0;
+      drop.visual.group.traverse((child) => {
+        if (!child.isMesh) return;
+        if (child.name === 'barrel') barrels += 1;
+        const p = child.getWorldPosition(new Vec());
+        if (!Number.isFinite(p.y)) bad += 1;
+      });
+      drop.visual.setHighlight(true);
+      const spinner = Boolean(drop.visual.spinner);
+      drop.visual.spinner.rotation.y += 1.0;
+      drop.visual.dispose();
+      return { barrels, bad, spinner, rarity: drop.rarity };
+    `, cap(12000));
+    check('loot: ground weapon drops render the real gun model',
+      Boolean(lootGunReport) && lootGunReport.barrels >= 1 && lootGunReport.bad === 0
+      && lootGunReport.spinner,
+      JSON.stringify(lootGunReport));
+
+    // A crowd of ground guns must not blow the draw-call budget.
+    const lootPerf = await client.evaluate(`
+      const g = window.__game;
+      const dbg = window.__gameDebug;
+      const Vec = g.controller.position.constructor;
+      const origin = g.controller.position.clone();
+      const dropped = [];
+      for (let i = 0; i < 12; i += 1) {
+        const type = ['pistol', 'assault_rifle', 'shotgun', 'sniper_rifle', 'smg'][i % 5];
+        dropped.push(g.loot.dropWeapon(
+          dbg.generateWeapon({ type, level: 3, rarity: i % 3 === 0 ? 'legendary' : 'rare', luck: 1 }),
+          new Vec(origin.x + 4 + (i % 4) * 2, origin.y, origin.z - 6 - Math.floor(i / 4) * 2)));
+      }
+      g.renderer.render(g.scene, g.camera);
+      const calls = g.renderer.info.render.calls;
+      const tris = g.renderer.info.render.triangles;
+      for (const item of dropped) g.loot.remove(item);
+      return { calls, tris, guns: dropped.length };
+    `, cap(15000));
+    check('performance: a dozen ground guns stay within the draw-call budget',
+      Boolean(lootPerf) && lootPerf.guns === 12 && lootPerf.calls < 3000 && lootPerf.tris < 400000,
+      JSON.stringify(lootPerf));
+
+    // Swapping slots must rebuild the viewmodel without leaking meshes.
+    const swapReport = await client.evaluate(`
+      const g = window.__game;
+      const count = () => { let n = 0; g.camera.traverse((c) => { if (c.isMesh) n += 1; }); return n; };
+      const before = count();
+      const from = g.weapons.activeSlot;
+      const to = from === 0 ? 1 : 0;
+      const swapped = g.weapons.selectSlot(to);
+      const after = count();
+      return { before, after, swapped, from, to };
+    `, cap(12000));
+    check('weapons: switching slots disposes the old gun and mounts a new one',
+      Boolean(swapReport) && swapReport.before > 12 && swapReport.after > 12,
+      JSON.stringify(swapReport));
     // ---- animation layer: every archetype must pose without breaking -------
     await client.evaluate(`
       const g = window.__game;

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { RARITY_HEX } from '../../../shared/constants';
+import type { Weapon } from '../../../shared/types';
+import { buildGunModel, fitGunLength } from '../weapons/WeaponModels';
 import { rng } from '../core/Rng';
 
 /**
@@ -447,9 +449,11 @@ export class EffectsSystem {
   }
 }
 
-/** Beam + rotating gem for ground loot, one small group per item. */
+/** Beam + item for ground loot: the real gun model for weapons, a gem otherwise. */
 export interface LootVisual {
   group: THREE.Group;
+  /** Node rotated each frame (the gun or the gem). */
+  spinner: THREE.Object3D;
   setHighlight(active: boolean): void;
   dispose(): void;
 }
@@ -459,7 +463,7 @@ const gemGeo = new THREE.OctahedronGeometry(0.34, 0);
 const haloGeo = new THREE.RingGeometry(0.55, 0.85, 18);
 haloGeo.rotateX(-Math.PI / 2);
 
-export function createLootVisual(rarity: string): LootVisual {
+export function createLootVisual(rarity: string, weapon?: Weapon | null): LootVisual {
   const color = new THREE.Color(RARITY_HEX[rarity] ?? 0xffffff);
   const group = new THREE.Group();
 
@@ -475,11 +479,6 @@ export function createLootVisual(rarity: string): LootVisual {
   beam.position.y = 3.5;
   group.add(beam);
 
-  const gemMat = new THREE.MeshLambertMaterial({ color, emissive: color.clone().multiplyScalar(0.7), flatShading: true });
-  const gem = new THREE.Mesh(gemGeo, gemMat);
-  gem.position.y = 0.75;
-  group.add(gem);
-
   const haloMat = new THREE.MeshBasicMaterial({
     color,
     transparent: true,
@@ -492,8 +491,41 @@ export function createLootVisual(rarity: string): LootVisual {
   halo.position.y = 0.05;
   group.add(halo);
 
+  // Weapons show the actual procedural gun, lying flat in the beam.
+  if (weapon) {
+    const gun = buildGunModel(weapon, { detail: 'low' });
+    fitGunLength(gun, 0.52);
+    const spinner = new THREE.Group();
+    gun.group.rotation.set(-Math.PI / 2.6, 0, 0.35);
+    spinner.position.y = 0.62;
+    spinner.add(gun.group);
+    group.add(spinner);
+    return {
+      group,
+      spinner,
+      setHighlight(active: boolean): void {
+        beamMat.opacity = active ? 0.62 : 0.3;
+        haloMat.opacity = active ? 0.95 : 0.55;
+        spinner.scale.setScalar(active ? 1.28 : 1);
+        gun.setGlow(active ? 1 : 0.25);
+      },
+      dispose(): void {
+        beamMat.dispose();
+        haloMat.dispose();
+        gun.dispose();
+        group.clear();
+      },
+    };
+  }
+
+  const gemMat = new THREE.MeshLambertMaterial({ color, emissive: color.clone().multiplyScalar(0.7), flatShading: true });
+  const gem = new THREE.Mesh(gemGeo, gemMat);
+  gem.position.y = 0.75;
+  group.add(gem);
+
   return {
     group,
+    spinner: gem,
     setHighlight(active: boolean): void {
       beamMat.opacity = active ? 0.62 : 0.3;
       haloMat.opacity = active ? 0.95 : 0.55;

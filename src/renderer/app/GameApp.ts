@@ -16,6 +16,7 @@ import { EffectsSystem, disposeSharedLootGeometries } from '../game/effects/Effe
 import { EnemyManager } from '../game/enemies/EnemyManager';
 import { EnemyFactory } from '../game/enemies/EnemyModels';
 import { LootSystem } from '../game/loot/LootSystem';
+import { disposeSharedWeaponGeometries } from '../game/weapons/WeaponModels';
 import { CollisionWorld } from '../game/physics/CollisionWorld';
 import { CombatDrone, droneDamage } from '../game/player/CombatDrone';
 import { PlayerController } from '../game/player/PlayerController';
@@ -1270,6 +1271,7 @@ export class GameApp {
     this.world.dispose();
     EnemyFactory.disposeShared();
     disposeSharedLootGeometries();
+    disposeSharedWeaponGeometries();
     this.renderer.dispose();
   }
 }

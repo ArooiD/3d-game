@@ -6,7 +6,7 @@ import type { CombatSystem } from '../combat/CombatSystem';
 import type { EffectsSystem } from '../effects/EffectsSystem';
 import type { PlayerController } from '../player/PlayerController';
 import type { PlayerState } from '../player/PlayerState';
-import { baseFor } from '../../data/weapons/weaponBases';
+import { buildGunModel, fitGunLength, type GunModel } from './WeaponModels';
 
 /**
  * Owns the three equipped slots, the viewmodel and every firing decision:
@@ -58,13 +58,15 @@ export class WeaponController {
   private burstPause = 0;
 
   private viewModel = new THREE.Group();
-  private gunMaterial: THREE.MeshLambertMaterial | null = null;
-  private barrelMesh: THREE.Mesh | null = null;
-  private readonly gunGeometry = new THREE.BoxGeometry(1, 1, 1);
-  private readonly magGeometry = new THREE.BoxGeometry(0.5, 0.9, 0.28);
-  private magMesh: THREE.Mesh | null = null;
-  private magMaterial: THREE.MeshLambertMaterial | null = null;
+  private gun: GunModel | null = null;
   private lastMuzzleWorld = new THREE.Vector3();
+  private muzzleGlow = 0;
+  /** Rest transforms for the animated internals, captured when the gun is built. */
+  private magRestY = 0;
+  private boltRestZ = 0;
+  private slideRestZ = 0;
+  /** 0..1 bolt travel, snapped back on every shot. */
+  private boltCycle = 1;
   private time = 0;
 
   constructor(
@@ -252,6 +254,9 @@ export class WeaponController {
       this.effects.tracer(origin, far, undefined, 0.6);
     }
     audio.play(shotSoundFor(weapon.weaponType));
+    // Cycle the action and flash the rarity emissive.
+    this.boltCycle = 0;
+    this.muzzleGlow = 1;
 
     const recoil = weapon.recoil * (this.isAiming ? 0.6 : 1);
     this.recoilPitch += recoil;
@@ -350,74 +355,74 @@ export class WeaponController {
     this.viewModel.position.y += this.swayY;
 
     // World-space muzzle position for tracers and effects.
-    if (this.barrelMesh) {
-      this.barrelMesh.getWorldPosition(this.lastMuzzleWorld);
+    const gun = this.gun;
+    if (gun) {
+      gun.muzzle.getWorldPosition(this.lastMuzzleWorld);
       this.lastMuzzleWorld.addScaledVector(TEMP_FWD.set(0, 0, -1).applyQuaternion(this.camera.quaternion), 0.28);
+      this.animateInternals(dt);
     } else {
       this.camera.getWorldPosition(this.lastMuzzleWorld);
     }
+  }
 
-    // Reload drops the magazine mesh out of the gun.
-    if (this.magMesh) {
-      this.magMesh.visible = this.gunMaterial !== null;
-      this.magMesh.position.y = this.reloading ? -0.16 - Math.sin(this.reloadProgress * Math.PI) * 0.16 : -0.12;
+  /** Drives the magazine drop, bolt cycling, pump stroke and rarity glow. */
+  private animateInternals(dt: number): void {
+    const gun = this.gun;
+    if (!gun) return;
+
+    // Bolt: kicked back by the shot, then springs forward.
+    this.boltCycle = Math.min(1, this.boltCycle + dt * (this.current ? this.current.fireRate * 1.6 + 6 : 8));
+    if (gun.bolt) {
+      const travel = this.reloading ? Math.sin(Math.min(1, this.reloadProgress * 2) * Math.PI) : 1 - this.boltCycle;
+      gun.bolt.position.z = this.boltRestZ + travel * 0.045;
     }
+
+    // Reload: mag drops out and a fresh one slides back in.
+    if (gun.magazine) {
+      if (this.reloading) {
+        const drop = Math.sin(Math.min(1, this.reloadProgress * 1.35) * Math.PI);
+        gun.magazine.position.y = this.magRestY - drop * 0.22;
+        gun.magazine.rotation.x = drop * 0.25;
+        gun.magazine.visible = this.reloadProgress < 0.55 || this.reloadProgress > 0.62;
+      } else {
+        gun.magazine.position.y = this.magRestY;
+        gun.magazine.rotation.x = 0;
+        gun.magazine.visible = true;
+      }
+    }
+
+    // Pump-action shotgun strokes on every shot.
+    if (gun.slide) {
+      const stroke = (1 - this.boltCycle) * 0.09;
+      gun.slide.position.z = this.slideRestZ + stroke;
+    }
+
+    // Rarity emissive pulses on fire and fades out.
+    this.muzzleGlow = Math.max(0, this.muzzleGlow - dt * 4.5);
+    gun.setGlow(this.muzzleGlow);
   }
 
   // ------------------------------------------------------------- viewmodel
 
   private buildViewmodel(): void {
+    this.gun?.dispose();
+    this.gun = null;
     for (const child of [...this.viewModel.children]) {
       this.viewModel.remove(child);
     }
-    this.barrelMesh = null;
-    this.magMesh = null;
-    this.gunMaterial = null;
 
     const weapon = this.current;
     if (!weapon) return;
 
-    const base = baseFor(weapon.weaponType);
-    const scale = weapon.modelScale ?? base.modelScale;
-    const color = weapon.modelColor ?? base.modelColor;
+    const model = buildGunModel(weapon, { detail: 'high', hands: true });
+    // Real guns are 0.3-1.2 m; the viewmodel keeps a compact, readable size.
+    fitGunLength(model, weapon.weaponType === 'sniper_rifle' ? 0.86 : 0.62);
+    this.viewModel.add(model.group);
+    this.gun = model;
 
-    this.gunMaterial = new THREE.MeshLambertMaterial({ color, emissive: 0x0a0d12 });
-    const gun = new THREE.Mesh(this.gunGeometry, this.gunMaterial);
-    gun.scale.set(scale[0], scale[1], scale[2]);
-    gun.position.set(0, 0, -scale[2] * 0.35);
-    this.viewModel.add(gun);
-
-    const magGeometry = this.magGeometry;
-    this.magMaterial = new THREE.MeshLambertMaterial({ color: 0x2b3038 });
-    const mag = new THREE.Mesh(magGeometry, this.magMaterial);
-    mag.scale.set(Math.max(0.06, scale[0] * 0.85), Math.max(0.1, scale[1] * 1.3), Math.max(0.06, scale[2] * 0.4));
-    mag.position.set(0, -scale[1] * 0.9, -scale[2] * 0.18);
-    this.viewModel.add(mag);
-    this.magMesh = mag;
-
-    // Sniper rifles get a scope, shotguns a wider muzzle, SMGs a foregrip.
-    if (weapon.weaponType === 'sniper_rifle') {
-      const scope = new THREE.Mesh(this.gunGeometry, this.magMaterial);
-      scope.scale.set(0.06, 0.06, 0.3);
-      scope.position.set(0, scale[1] * 0.85, -scale[2] * 0.42);
-      this.viewModel.add(scope);
-    }
-    if (weapon.weaponType === 'shotgun') {
-      const second = new THREE.Mesh(this.gunGeometry, this.gunMaterial);
-      second.scale.set(scale[0] * 0.62, scale[1] * 0.62, scale[2] * 0.86);
-      second.position.set(0, -scale[1] * 0.42, -scale[2] * 0.5);
-      this.viewModel.add(second);
-    }
-
-    const barrel = new THREE.Mesh(this.gunGeometry, this.gunMaterial);
-    barrel.scale.set(Math.max(0.03, scale[0] * 0.4), Math.max(0.03, scale[1] * 0.4), Math.max(0.05, scale[2] * 0.22));
-    barrel.position.set(0, 0, -scale[2] * 0.98);
-    this.viewModel.add(barrel);
-    this.barrelMesh = barrel;
-
-    // Rarity tint on the receiver so a good drop is visible in-hand.
-    const rarityGlow = RARITY_EMISSIVE[weapon.rarity];
-    if (rarityGlow !== undefined) this.gunMaterial.emissive.setHex(rarityGlow);
+    this.magRestY = model.magazine ? model.magazine.position.y : 0;
+    this.boltRestZ = model.bolt ? model.bolt.position.z : 0;
+    this.slideRestZ = model.slide ? model.slide.position.z : 0;
   }
 
   get hudState(): WeaponHudState {
@@ -466,20 +471,10 @@ export class WeaponController {
 
   dispose(): void {
     this.viewModel.removeFromParent();
-    this.gunGeometry.dispose();
-    this.magGeometry.dispose();
-    this.gunMaterial?.dispose();
-    this.magMaterial?.dispose();
+    this.gun?.dispose();
+    this.gun = null;
   }
 }
-
-const RARITY_EMISSIVE: Record<string, number> = {
-  common: 0x0a0d12,
-  uncommon: 0x0f2a17,
-  rare: 0x0f2140,
-  epic: 0x240f40,
-  legendary: 0x3d2606,
-};
 
 const TEMP_TARGET = new THREE.Vector3();
 const TEMP_FWD = new THREE.Vector3();
