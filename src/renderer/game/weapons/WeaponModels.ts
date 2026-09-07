@@ -50,6 +50,8 @@ export interface GunModel {
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const cylGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 12);
 const torusGeo = new THREE.TorusGeometry(1, 0.14, 6, 14);
+/** Rounded body used for gloved hands: a box hand reads as a brick at eye height. */
+const capsuleGeo = new THREE.CapsuleGeometry(0.5, 1, 3, 10);
 
 const COLOR_DARK = 0x23272e;
 const COLOR_RAIL = 0x3d434c;
@@ -440,9 +442,11 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
      * the weapon, which is what stops the pair reading as one flat cutout.
      */
     const gauntlet = (hand: THREE.Group, side: number, length: number): void => {
-      place(hand, boxGeo, sleeve, 0.062, 0.05, 0.045, 0.004 * side, -0.05, 0.055).rotation.x = 0.5;
-      place(hand, boxGeo, glove, 0.076, 0.074, length, 0, -0.056 - length * 0.46, 0.02 + length * 0.44)
-        .rotation.x = Math.atan2(0.62, 1);
+      // Wrist cuff plus a tapered forearm: a rounded forearm keeps the arms from
+      // reading as two planks bolted to the gun.
+      place(hand, cylGeo, sleeve, 0.062, 0.05, 0.045, 0.004 * side, -0.05, 0.055).rotation.x = 0.5;
+      place(hand, capsuleGeo, glove, 0.076, length / 2, 0.076, 0, -0.056 - length * 0.46, 0.02 + length * 0.44)
+        .rotation.x = Math.PI / 2 + Math.atan2(0.62, 1);
       if (options.armorAccent !== undefined) {
         const lamp = new THREE.MeshLambertMaterial({
           color: options.armorAccent,
@@ -472,14 +476,14 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
       node.position.copy(grip);
       node.rotation.set(0.12, opts.yaw, opts.roll);
       group.add(node);
-      // Palm, wrapped around whatever it is holding.
-      place(node, boxGeo, glove, 0.055, 0.068, 0.072, 0, 0, 0);
+      // Palm: a rounded block wrapped around whatever it is holding.
+      place(node, capsuleGeo, glove, 0.055, 0.034, 0.072, 0, 0, 0);
       // Four fingers curling over the front face of the grip.
       for (let i = 0; i < 4; i++) {
-        place(node, boxGeo, glove, 0.013, 0.048, 0.017, -0.029 + i * 0.017, 0.005, -0.04).rotation.x = -0.35;
+        place(node, capsuleGeo, glove, 0.013, 0.024, 0.017, -0.029 + i * 0.017, 0.005, -0.04).rotation.x = -0.35;
       }
       // Thumb on the near flank, knuckle toward the camera.
-      place(node, boxGeo, glove, 0.017, 0.02, 0.05, 0.031 * side, 0.02, -0.014).rotation.x = -0.5;
+      place(node, capsuleGeo, glove, 0.017, 0.025, 0.025, 0.031 * side, 0.02, -0.014).rotation.x = -0.5;
       gauntlet(node, side, opts.length);
       return node;
     };
@@ -573,6 +577,7 @@ export function disposeSharedWeaponGeometries(): void {
   boxGeo.dispose();
   cylGeo.dispose();
   torusGeo.dispose();
+  capsuleGeo.dispose();
 }
 
 /** Convenience for previews: a gun at a fixed display length. */

@@ -64,6 +64,11 @@ const PROPORTIONS: Record<EnemyBehavior, Proportions> = {
 const unit = new THREE.BoxGeometry(1, 1, 1);
 const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
 const ring = new THREE.TorusGeometry(1, 0.06, 6, 20);
+/** Limb, skull and torso shapes: a hostile made of boxes reads as a moving crate. */
+const capsule = new THREE.CapsuleGeometry(0.5, 1, 3, 10);
+const sphere = new THREE.SphereGeometry(0.5, 12, 8);
+const prism = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+const dome = new THREE.SphereGeometry(0.5, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
 
 export interface BuiltEnemy {
   skeleton: Skeleton;
@@ -98,7 +103,7 @@ export class EnemyFactory {
     const meshes: THREE.Mesh[] = [];
     const flashable: THREE.Mesh[] = [];
 
-    /** Box shell sized in metres, hung off a bone. */
+    /** Shell sized in metres, hung off a bone. A box unless a shape is named. */
     const shell = (
       parent: THREE.Object3D,
       w: number,
@@ -109,8 +114,9 @@ export class EnemyFactory {
       z: number,
       material: THREE.Material,
       flash = true,
+      geometry: THREE.BufferGeometry = unit,
     ): THREE.Mesh => {
-      const mesh = new THREE.Mesh(unit, material);
+      const mesh = new THREE.Mesh(geometry, material);
       mesh.scale.set(w, h, d);
       mesh.position.set(x, y, z);
       parent.add(mesh);
@@ -118,6 +124,18 @@ export class EnemyFactory {
       if (flash && (material === body || material === dark)) flashable.push(mesh);
       return mesh;
     };
+
+    /**
+     * Limb segment: a capsule spanning `length`, centred at `y`. The unit capsule
+     * is 2 units tall, so only the half-length goes into the vertical scale.
+     */
+    const limbShell = (
+      parent: THREE.Object3D,
+      thickness: number,
+      length: number,
+      y: number,
+      material: THREE.Material,
+    ): THREE.Mesh => shell(parent, thickness, length / 2, thickness, 0, y, 0, material, true, capsule);
 
     const tube = (
       parent: THREE.Object3D,
@@ -178,21 +196,23 @@ export class EnemyFactory {
     const limb = p.limbThickness * height;
     const leg = p.legThickness * height;
 
-    shell(hips, torsoW * 0.92, torsoH * 0.3, torsoD * 0.9, 0, torsoH * 0.02, 0, dark);
-    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 0.95, 0, torsoH * 0.22, 0, body);
-    shell(chest, torsoW, torsoH * 0.52, torsoD, 0, torsoH * 0.16, 0, body);
-    shell(chest, torsoW * 0.72, torsoH * 0.22, torsoD * 0.42, 0, torsoH * 0.34, -torsoD * 0.55, trim);
+    // Scaling the octagon past 1 in depth gives a barrel chest from the front
+    // while leaving flat flanks for the plates to sit on.
+    shell(hips, torsoW * 0.92, torsoH * 0.3, torsoD * 1.15, 0, torsoH * 0.02, 0, dark, true, prism);
+    shell(spine, torsoW * 0.98, torsoH * 0.5, torsoD * 1.2, 0, torsoH * 0.22, 0, body, true, prism);
+    shell(chest, torsoW, torsoH * 0.52, torsoD * 1.25, 0, torsoH * 0.16, 0, body, true, prism);
+    shell(chest, torsoW * 0.72, torsoH * 0.22, torsoD * 0.42, 0, torsoH * 0.34, -torsoD * 0.6, trim);
 
     const headSize = p.headSize * height;
-    const headShell = shell(head, headSize, headSize * 0.92, headSize, 0, headSize * 0.44, 0, dark);
+    const headShell = shell(head, headSize, headSize, headSize * 0.95, 0, headSize * 0.44, 0, dark, true, sphere);
     // The visor owns a per-instance material: it is the state/headshot lamp.
     const indicatorMaterial = (accent as THREE.MeshLambertMaterial).clone();
-    const indicatorShell = new THREE.Mesh(unit, indicatorMaterial);
-    indicatorShell.scale.set(headSize * 0.86, headSize * 0.2, headSize * 0.14);
-    indicatorShell.position.set(0, headSize * 0.5, -headSize * 0.48);
+    const indicatorShell = new THREE.Mesh(sphere, indicatorMaterial);
+    indicatorShell.scale.set(headSize * 0.8, headSize * 0.22, headSize * 0.3);
+    indicatorShell.position.set(0, headSize * 0.48, -headSize * 0.4);
     head.add(indicatorShell);
     meshes.push(indicatorShell);
-    shell(head, headSize * 0.7, headSize * 0.22, headSize * 0.3, 0, headSize * 0.18, -headSize * 0.3, trim, false);
+    shell(head, headSize * 0.92, headSize * 0.3, headSize * 0.88, 0, headSize * 0.66, 0, trim, false, dome);
 
     for (const side of [-1, 1] as const) {
       const tag = side < 0 ? 'L' : 'R';
@@ -203,15 +223,17 @@ export class EnemyFactory {
       const shinBone = skeleton.bones.get(`shin${tag}`)!;
       const footBone = skeleton.bones.get(`foot${tag}`)!;
 
-      shell(shoulderBone, limb * 1.5, limb * 1.2, limb * 1.5, 0, limb * 0.4, 0, body);
-      shell(armBone, limb, p.upperArm * height, limb, 0, -p.upperArm * height * 0.5, 0, body);
-      shell(forearmBone, limb * 0.9, p.forearm * height, limb * 0.9, 0, -p.forearm * height * 0.5, 0, dark);
+      shell(shoulderBone, limb * 1.7, limb * 1.5, limb * 1.7, 0, limb * 0.1, 0, body, true, dome);
+      limbShell(armBone, limb, p.upperArm * height, -p.upperArm * height * 0.5, body);
+      shell(armBone, limb * 0.85, limb * 0.85, limb * 0.85, 0, -p.upperArm * height, 0, trim, false, sphere);
+      limbShell(forearmBone, limb * 0.9, p.forearm * height, -p.forearm * height * 0.5, dark);
       shell(forearmBone, limb * 1.1, limb * 0.7, limb * 1.1, 0, -p.forearm * height * 0.94, 0, trim, false);
 
-      shell(thighBone, leg, p.thigh * height, leg, 0, -p.thigh * height * 0.5, 0, dark);
-      shell(shinBone, leg * 0.88, p.shin * height, leg * 0.88, 0, -p.shin * height * 0.5, 0, dark);
+      limbShell(thighBone, leg, p.thigh * height, -p.thigh * height * 0.5, dark);
+      shell(thighBone, leg * 0.9, leg * 0.9, leg * 0.9, 0, -p.thigh * height, 0, trim, false, sphere);
+      limbShell(shinBone, leg * 0.88, p.shin * height, -p.shin * height * 0.5, dark);
       // Boot, wider and pushed forward so the stance reads from the side.
-      shell(footBone, leg * 1.05, leg * 0.45, leg * 1.9, 0, -leg * 0.18, -leg * 0.4, trim);
+      shell(footBone, leg * 1.05, leg * 0.45, leg * 1.9, 0, -leg * 0.18, -leg * 0.4, trim, false, prism);
     }
 
     // ------------------------------------------------------- archetype props
@@ -401,6 +423,10 @@ export class EnemyFactory {
     unit.dispose();
     cylinder.dispose();
     ring.dispose();
+    capsule.dispose();
+    sphere.dispose();
+    prism.dispose();
+    dome.dispose();
   }
 }
 

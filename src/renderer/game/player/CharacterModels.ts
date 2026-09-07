@@ -8,9 +8,10 @@ import { Skeleton, type BoneName } from '../anim/Rig';
  *
  * The three archetypes share one humanoid skeleton (`anim/Rig`, the same bones
  * the enemies use, so the existing clips drive them for free) and differ in
- * proportions, armour and headgear. Everything is built from a unit box and a
- * unit cylinder scaled per part, matching EnemyModels: no external assets, no
- * per-instance buffers.
+ * proportions, armour and headgear. Limbs are capsules over ball joints, torso
+ * sections are chamfered prisms and helmets are spheres; only armour plates are
+ * boxes. Everything is built from shared unit primitives scaled per part,
+ * matching EnemyModels: no external assets, no per-instance buffers.
  *
  * Proportions are absolute metres, not fractions of an arbitrary height, and
  * the hip height is derived from the leg chain so the feet always land exactly
@@ -77,9 +78,23 @@ const PROPORTIONS: Record<CharacterId, Proportions> = {
 const HOLD_ARM = 54;
 const HOLD_ELBOW = -46;
 
+/**
+ * Unit primitives, all centred on the origin and 1 unit tall, so `shell` can place
+ * a part with a plain scale. Flat shading keeps them low-poly, but nothing is a
+ * cube: limbs are capsules, joints are spheres, torso sections are chamfered
+ * prisms, and plates stay boxes because a plate should read flat.
+ */
 const unitBox = new THREE.BoxGeometry(1, 1, 1);
-const unitCylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
-const unitSphere = new THREE.SphereGeometry(0.5, 10, 8);
+const unitCylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 12);
+const unitSphere = new THREE.SphereGeometry(0.5, 14, 10);
+/** Tapered tube: narrower at the top, so limbs read as limbs. */
+const unitTaper = new THREE.CylinderGeometry(0.36, 0.5, 1, 12);
+/** Octagonal prism: a box with its four corners chamfered. */
+const unitPrism = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+/** Capsule whose total height is 2, so a limb of length L scales y by L / 2. */
+const unitCapsule = new THREE.CapsuleGeometry(0.5, 1, 3, 12);
+/** Upper hemisphere, for pauldrons and helmet caps. */
+const unitDome = new THREE.SphereGeometry(0.5, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
 const sharedMaterials = new Map<string, THREE.MeshLambertMaterial>();
 
 /** Cached per colour so N previews and one viewmodel share the same materials. */
@@ -161,6 +176,20 @@ export function buildCharacterModel(
     return mesh;
   };
 
+  /**
+   * Limb segment: a capsule of the given total length centred at `y`. The unit
+   * capsule is 2 units tall, so only the length halves into the vertical scale.
+   */
+  const limb = (
+    parent: THREE.Object3D,
+    thickness: number,
+    length: number,
+    y: number,
+    mat: THREE.Material,
+    taper = false,
+  ): THREE.Mesh =>
+    shell(parent, taper ? unitTaper : unitCapsule, thickness, length / (taper ? 1 : 2), thickness, 0, y, 0, mat);
+
   // The foot shell hangs 0.7 of its height below the ankle bone; stacking the
   // leg chain on top of that plants the sole exactly on the root plane.
   const hipY = p.hipDrop + p.thigh + p.shin + p.footHeight * 0.7;
@@ -198,18 +227,21 @@ export function buildCharacterModel(
   }
 
   // --------------------------------------------------------------- shells
-  shell(hips, unitBox, p.pelvisW, p.chestH * 0.52, p.pelvisD, 0, 0.02, 0, suit);
-  shell(hips, unitBox, p.pelvisW * 1.02, 0.06, p.pelvisD * 1.02, 0, -0.06, 0, trim);
-  shell(spine, unitBox, p.torsoW, p.chest + 0.10, p.torsoD, 0, p.chest * 0.45, 0, suit);
-  shell(chest, unitBox, p.chestW, p.chestH, p.chestD, 0, 0.02, 0, plating);
+  // Torso sections are chamfered octagonal prisms squashed along depth: rounded in
+  // plan view like a body, but still flat front to back so the plates sit on them.
+  shell(hips, unitPrism, p.pelvisW, p.chestH * 0.52, p.pelvisD * 1.25, 0, 0.02, 0, suit);
+  shell(hips, unitPrism, p.pelvisW * 1.02, 0.06, p.pelvisD * 1.3, 0, -0.06, 0, trim);
+  shell(spine, unitPrism, p.torsoW, p.chest + 0.10, p.torsoD * 1.25, 0, p.chest * 0.45, 0, suit);
+  shell(chest, unitPrism, p.chestW, p.chestH, p.chestD * 1.25, 0, 0.02, 0, plating);
   // Chest rig + collar so the front plate does not read as a plain box.
   shell(chest, unitBox, p.chestW * 0.5, p.chestH * 0.55, 0.06, 0, 0.02, -p.chestD * 0.55, trim);
   shell(chest, unitBox, p.chestW * 0.88, 0.07, p.chestD * 0.5, 0, p.chestH * 0.42, 0, trim);
-  shell(chest, unitBox, 0.10, 0.045, 0.10, p.chestW * 0.24, 0.06, -p.chestD * 0.6, glow);
+  shell(chest, unitSphere, 0.10, 0.05, 0.10, p.chestW * 0.24, 0.06, -p.chestD * 0.6, glow);
 
   const hs = p.headSize;
-  shell(head, unitBox, hs, hs * 0.94, hs, 0, hs * 0.46, 0, suit);
-  shell(head, unitBox, hs * 0.88, hs * 0.3, hs * 0.18, 0, hs * 0.5, -hs * 0.45, glow);
+  // A helmet is a sphere with a visor band, not a cube with a light strip.
+  shell(head, unitSphere, hs, hs * 1.0, hs, 0, hs * 0.46, 0, suit);
+  shell(head, unitSphere, hs * 0.84, hs * 0.3, hs * 0.36, 0, hs * 0.5, -hs * 0.4, glow);
 
   for (const side of [-1, 1] as const) {
     const tag = side < 0 ? 'L' : 'R';
@@ -222,42 +254,46 @@ export function buildCharacterModel(
     const at = p.armThickness;
     const lg = p.legThickness;
 
-    shell(shoulder, unitBox, at * 1.9, at * 1.4, at * 1.8, side * at * 0.3, 0, 0, plating);
-    shell(arm, unitBox, at, p.upperArm, at, 0, -p.upperArm * 0.5, 0, suit);
-    shell(forearm, unitBox, at * 0.94, p.forearm, at * 0.94, 0, -p.forearm * 0.5, 0, plating);
-    shell(forearm, unitBox, at * 1.05, at * 0.5, at * 1.05, 0, -p.forearm, 0, rubber);
+    // Ball joints inside capsule segments: the shoulder, elbow, hip and knee read
+    // as round articulation instead of the seams between boxes.
+    shell(shoulder, unitDome, at * 2.1, at * 1.6, at * 2.0, side * at * 0.25, -at * 0.15, 0, plating);
+    limb(arm, at, p.upperArm, -p.upperArm * 0.5, suit);
+    shell(arm, unitSphere, at * 0.9, at * 0.9, at * 0.9, 0, -p.upperArm, 0, rubber);
+    limb(forearm, at * 0.94, p.forearm, -p.forearm * 0.5, plating, true);
+    shell(forearm, unitCylinder, at * 1.05, at * 0.5, at * 1.05, 0, -p.forearm + at * 0.25, 0, rubber);
 
-    shell(thigh, unitBox, lg, p.thigh, lg, 0, -p.thigh * 0.5, 0, suit);
-    shell(shin, unitBox, lg * 0.92, p.shin, lg * 0.92, 0, -p.shin * 0.5, 0, plating);
-    shell(foot, unitBox, lg * 1.05, p.footHeight, lg * 1.7, 0, -p.footHeight * 0.2, -lg * 0.28, rubber);
+    limb(thigh, lg, p.thigh, -p.thigh * 0.5, suit);
+    shell(thigh, unitSphere, lg * 0.95, lg * 0.95, lg * 0.95, 0, -p.thigh, 0, rubber);
+    limb(shin, lg * 0.92, p.shin, -p.shin * 0.5, plating, true);
+    shell(foot, unitPrism, lg * 1.05, p.footHeight, lg * 1.7, 0, -p.footHeight * 0.2, -lg * 0.28, rubber);
   }
 
   // ------------------------------------------------------ archetype gear
   if (characterId === 'vanguard') {
-    // Slab shoulders, a brow-crest helmet and a hip-mounted ammo drum.
+    // Domed pauldrons, a crested helmet cap and a hip-mounted ammo drum.
     for (const side of [-1, 1] as const) {
       const shoulder = skeleton.bones.get(side < 0 ? 'shoulderL' : 'shoulderR')!;
-      shell(shoulder, unitBox, p.armThickness * 2.7, p.armThickness * 1.1, p.armThickness * 2.3, side * p.armThickness * 0.8, p.armThickness * 0.5, 0, plating);
+      shell(shoulder, unitDome, p.armThickness * 2.9, p.armThickness * 1.9, p.armThickness * 2.5, side * p.armThickness * 0.7, -p.armThickness * 0.2, 0, plating);
     }
-    shell(head, unitBox, hs * 1.08, hs * 0.28, hs * 1.08, 0, hs * 0.86, 0, plating);
+    shell(head, unitDome, hs * 1.12, hs * 0.62, hs * 1.12, 0, hs * 0.72, 0, plating);
     shell(head, unitBox, hs * 0.22, hs * 0.4, hs * 0.22, 0, hs * 1.06, 0, trim);
     shell(hips, unitCylinder, 0.22, 0.24, 0.22, -p.pelvisW * 0.54, 0, p.pelvisD * 0.2, trim);
     shell(hips, unitBox, p.pelvisW * 0.7, 0.26, 0.1, 0, 0.06, p.pelvisD * 0.58, plating);
   } else if (characterId === 'ranger') {
     // Snub antenna, a long scope canted over the visor and a slim pack.
-    shell(head, unitBox, hs * 1.02, hs * 0.24, hs * 1.1, 0, hs * 0.74, hs * 0.06, plating);
-    shell(head, unitBox, 0.05, 0.05, hs * 1.15, hs * 0.3, hs * 0.98, -hs * 0.1, trim).rotation.x = 0.35;
-    shell(head, unitBox, 0.045, hs * 0.7, 0.045, -hs * 0.44, hs * 1.06, hs * 0.18, trim);
-    shell(chest, unitBox, p.chestW * 0.6, p.chestH * 0.8, 0.14, 0, 0.02, p.chestD * 0.62, suit);
-    shell(chest, unitBox, 0.06, 0.05, 0.06, p.chestW * 0.2, p.chestH * 0.3, p.chestD * 0.72, glow);
+    shell(head, unitDome, hs * 1.06, hs * 0.5, hs * 1.08, 0, hs * 0.62, hs * 0.04, plating);
+    shell(head, unitCylinder, 0.05, 0.05, hs * 1.15, hs * 0.3, hs * 0.98, -hs * 0.1, trim).rotation.x = 0.35;
+    shell(head, unitCylinder, 0.045, hs * 0.7, 0.045, -hs * 0.44, hs * 1.06, hs * 0.18, trim);
+    shell(chest, unitPrism, p.chestW * 0.6, p.chestH * 0.8, 0.2, 0, 0.02, p.chestD * 0.62, suit);
+    shell(chest, unitSphere, 0.06, 0.05, 0.06, p.chestW * 0.2, p.chestH * 0.3, p.chestD * 0.72, glow);
   } else {
     // Engineer: shield cell on the back and a folded drone pod on the shoulder.
-    shell(chest, unitBox, p.chestW * 0.74, p.chestH * 0.9, 0.15, 0, 0.02, p.chestD * 0.62, trim);
+    shell(chest, unitPrism, p.chestW * 0.74, p.chestH * 0.9, 0.22, 0, 0.02, p.chestD * 0.62, trim);
     shell(chest, unitCylinder, 0.2, 0.26, 0.2, 0, 0.02, p.chestD * 0.82, glow);
-    shell(skeleton.bones.get('shoulderR')!, unitBox, p.armThickness * 2.4, p.armThickness * 1.2, p.armThickness * 2, p.armThickness * 0.6, p.armThickness * 0.9, p.armThickness * 0.2, plating);
+    shell(skeleton.bones.get('shoulderR')!, unitDome, p.armThickness * 2.6, p.armThickness * 1.9, p.armThickness * 2.2, p.armThickness * 0.55, p.armThickness * 0.3, p.armThickness * 0.2, plating);
     shell(skeleton.bones.get('shoulderR')!, unitSphere, 0.16, 0.16, 0.16, p.armThickness * 1.4, p.armThickness * 1.6, 0, glow);
-    shell(head, unitBox, hs * 1.04, hs * 0.2, hs * 1.04, 0, hs * 0.82, 0, plating);
-    shell(head, unitBox, hs * 0.2, hs * 0.16, hs * 0.5, hs * 0.5, hs * 0.5, -hs * 0.2, glow);
+    shell(head, unitDome, hs * 1.08, hs * 0.46, hs * 1.08, 0, hs * 0.66, 0, plating);
+    shell(head, unitSphere, hs * 0.2, hs * 0.16, hs * 0.5, hs * 0.5, hs * 0.5, -hs * 0.2, glow);
   }
 
   return {
@@ -274,9 +310,9 @@ export function buildCharacterModel(
 
 /** Frees the module-level buffers; called from the app teardown. */
 export function disposeSharedCharacterResources(): void {
-  unitBox.dispose();
-  unitCylinder.dispose();
-  unitSphere.dispose();
+  for (const geo of [unitBox, unitCylinder, unitSphere, unitTaper, unitPrism, unitCapsule, unitDome]) {
+    geo.dispose();
+  }
   for (const mat of sharedMaterials.values()) mat.dispose();
   sharedMaterials.clear();
 }
