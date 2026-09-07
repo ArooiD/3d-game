@@ -46,6 +46,13 @@ const VIEWMODEL_OFFSET = new THREE.Vector3(0.19, -0.17, -0.38);
 /** Transitional aim pose; the final position is solved onto the view axis. */
 const AIM_OFFSET = new THREE.Vector3(0, -0.08, -0.26);
 /**
+ * Sprint carries the gun down and out of the sight line instead of leaving the
+ * hands frozen in their combat pose. The slight right bias keeps the support arm
+ * readable while the muzzle is rolled down toward the lower-left of the frame.
+ */
+const SPRINT_OFFSET = new THREE.Vector3(0.29, -0.285, -0.31);
+const SPRINT_ROTATION = new THREE.Vector3(-0.34, 0.18, -0.22);
+/**
  * How far in front of the eye the optic sits while aiming. The sight anchor is
  * solved onto the view axis at exactly this depth, so the optic - red dot,
  * scope or iron notch - lands on the crosshair instead of beside it.
@@ -55,6 +62,9 @@ const ADS_SIGHT_DEPTH = 0.3;
 const ADS_VIEWMODEL_FOV = 44;
 /** Blend rate per second for the ADS pose and the world zoom. */
 const ADS_BLEND_RATE = 13;
+/** Sprint should lower quickly but recover even faster once the run stops. */
+const SPRINT_ENTER_RATE = 10;
+const SPRINT_EXIT_RATE = 15;
 
 export class WeaponController {
   readonly slots: (Weapon | null)[] = [null, null, null];
@@ -69,6 +79,8 @@ export class WeaponController {
    * can never disagree. Eased so raising the weapon reads as motion, not a snap.
    */
   private ads = 0;
+  /** 0 at combat ready, 1 in the fully lowered sprint pose. */
+  private sprintBlend = 0;
   /** Zoom actually applied to the world camera, eased towards `targetAdsZoom`. */
   private appliedZoom = 1;
   /** Base world FOV supplied by settings; ADS divides into it. */
@@ -258,6 +270,13 @@ export class WeaponController {
     }
     const isFreshPress = !this.fireHeld;
 
+    // A sprint pose is a real lowered weapon state, not merely cosmetic. Firing
+    // waits until the player releases sprint so tracers never leave a gun that is
+    // visibly pointing at the floor. Auto fire resumes naturally if held.
+    if (this.controller.sprinting) {
+      this.fireHeld = held;
+      return false;
+    }
     if (this.reloading) return false;
     if (this.time < this.nextFireAt) return false;
     if (this.burstPause > 0) return false;
@@ -403,42 +422,86 @@ export class WeaponController {
 
     const speed = Math.hypot(this.controller.velocity.x, this.controller.velocity.z);
     const moveAmount = Math.min(1, speed / Math.max(1, this.player.stats.sprintSpeed));
-    this.bobPhase += dt * (7 + moveAmount * 6);
-    // Standing still steadies the hands; aiming wants the gun rock steady.
-    const steadiness = moveAmount * (1 - this.ads * 0.75);
-    const bobX = Math.cos(this.bobPhase) * 0.008 * steadiness;
-    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.009 * steadiness;
+    const groundedMove = moveAmount * (this.controller.grounded ? 1 : 0.18);
 
-    const target = this.isAiming ? AIM_OFFSET : VIEWMODEL_OFFSET;
-    const base = this.viewModel.position;
-    const blend = Math.min(1, dt * (this.isAiming ? 14 : 9));
-    base.lerp(TEMP_TARGET.set(target.x, target.y, target.z), blend);
+    // Sprint is blended independently from ADS so the hands can finish returning
+    // to combat-ready while the camera is already accepting a new aim input.
+    const wantsSprint = this.controller.sprinting && !this.reloading && !this.player.dead ? 1 : 0;
+    const sprintRate = wantsSprint > this.sprintBlend ? SPRINT_ENTER_RATE : SPRINT_EXIT_RATE;
+    const sprintAlpha = 1 - Math.exp(-dt * sprintRate);
+    this.sprintBlend += (wantsSprint - this.sprintBlend) * sprintAlpha;
+    if (this.sprintBlend < 0.0005) this.sprintBlend = 0;
+    if (this.sprintBlend > 0.9995) this.sprintBlend = 1;
 
-    // Landing dip + firing kick along the view axis.
-    base.y -= this.controller.velocity.y < -6 ? 0.02 : 0;
-    base.z += this.recoilKick;
-    base.x += bobX;
-    base.y += bobY - this.recoilKick * 0.35;
+    // The gait phase follows movement speed. Walking is a restrained figure-eight;
+    // sprinting adds a larger shoulder-driven swing. A small breathing component
+    // remains at rest so the procedural arms do not look bolted to the camera.
+    this.bobPhase += dt * (6.2 + groundedMove * 6.8 + this.sprintBlend * 2.2);
+    const aimSteady = 1 - this.ads * 0.9;
+    const walkAmount = groundedMove * aimSteady * (1 - this.sprintBlend * 0.45);
+    const walkBobX = Math.cos(this.bobPhase) * 0.0065 * walkAmount;
+    const walkBobY = Math.abs(Math.sin(this.bobPhase)) * 0.0075 * walkAmount;
+    const runSwing = Math.sin(this.bobPhase) * this.sprintBlend;
+    const runBounce = Math.abs(Math.cos(this.bobPhase)) * this.sprintBlend;
+    const breath = Math.sin(this.time * 1.55) * 0.0022 * (1 - this.ads) * (1 - this.sprintBlend);
 
-    this.viewModel.rotation.set(
-      -this.recoilKick * 2.6 + (this.reloading ? Math.sin(this.reloadProgress * Math.PI * 3) * 0.3 : 0),
-      this.reloading ? Math.sin(this.reloadProgress * Math.PI) * 0.5 : 0,
-      this.reloading ? Math.sin(this.reloadProgress * Math.PI) * 0.25 : bobX * 1.4,
-    );
+    // Velocity sway is computed in player-local coordinates. Using world X/Z made
+    // the hands lean in a different direction after the player turned 90 degrees.
+    const sinYaw = Math.sin(this.controller.yaw);
+    const cosYaw = Math.cos(this.controller.yaw);
+    const localStrafe = this.controller.velocity.x * cosYaw - this.controller.velocity.z * sinYaw;
+    const localForward = -this.controller.velocity.x * sinYaw - this.controller.velocity.z * cosYaw;
+    const swayTargetX = THREE.MathUtils.clamp(-localStrafe * 0.0035, -0.022, 0.022);
+    const swayTargetY = THREE.MathUtils.clamp(-localForward * 0.0017, -0.017, 0.017);
+    const swayDamp = (1 - this.ads) * (1 - this.sprintBlend * 0.55);
+    const swayAlpha = 1 - Math.exp(-dt * 7);
+    this.swayX = THREE.MathUtils.lerp(this.swayX, swayTargetX * swayDamp, swayAlpha);
+    this.swayY = THREE.MathUtils.lerp(this.swayY, swayTargetY * swayDamp, swayAlpha);
 
-    const swayTargetX = THREE.MathUtils.clamp(-this.controller.velocity.x * 0.004, -0.02, 0.02);
-    const swayTargetY = THREE.MathUtils.clamp(-this.controller.velocity.z * 0.003, -0.02, 0.02);
-    const swayDamp = 1 - this.ads;
-    this.swayX = THREE.MathUtils.lerp(this.swayX, swayTargetX * swayDamp, Math.min(1, dt * 6));
-    this.swayY = THREE.MathUtils.lerp(this.swayY, swayTargetY * swayDamp, Math.min(1, dt * 6));
-    this.viewModel.position.x += this.swayX;
-    this.viewModel.position.y += this.swayY;
+    // Compose the complete target first, then ease the hands toward it. The old
+    // code eased to rest and added bob afterwards, which accumulated offsets and
+    // made the wrists appear to twitch instead of moving as one supported weapon.
+    TEMP_TARGET.copy(VIEWMODEL_OFFSET).lerp(SPRINT_OFFSET, this.sprintBlend);
+    TEMP_TARGET.lerp(AIM_OFFSET, this.ads);
+    TEMP_TARGET.x += walkBobX + runSwing * 0.013 + this.swayX;
+    TEMP_TARGET.y += walkBobY + runBounce * 0.011 + breath + this.swayY;
+    TEMP_TARGET.y -= this.controller.velocity.y < -6 ? 0.016 : 0;
+    TEMP_TARGET.y -= this.recoilKick * 0.35;
+    TEMP_TARGET.z += this.recoilKick + Math.sin(this.bobPhase * 2) * 0.004 * this.sprintBlend;
+
+    const positionRate = this.ads > 0.01 ? 15 : this.sprintBlend > 0.01 ? 11 : 9;
+    this.viewModel.position.lerp(TEMP_TARGET, 1 - Math.exp(-dt * positionRate));
+
+    // Hands and gun share one rigid grip, so rotate the entire viewmodel. Reload
+    // gestures are layered over the locomotion pose rather than replacing it with
+    // a frame-perfect snap. Sprint lowers and cants the weapon like a proper run.
+    const reloadPitch = this.reloading ? Math.sin(this.reloadProgress * Math.PI * 3) * 0.3 : 0;
+    const reloadYaw = this.reloading ? Math.sin(this.reloadProgress * Math.PI) * 0.5 : 0;
+    const reloadRoll = this.reloading ? Math.sin(this.reloadProgress * Math.PI) * 0.25 : 0;
+    const targetRotX =
+      SPRINT_ROTATION.x * this.sprintBlend -
+      this.recoilKick * 2.6 +
+      reloadPitch -
+      walkBobY * 0.9 -
+      runBounce * 0.025 +
+      breath * 1.6;
+    const targetRotY = SPRINT_ROTATION.y * this.sprintBlend + reloadYaw + runSwing * 0.018;
+    const targetRotZ =
+      SPRINT_ROTATION.z * this.sprintBlend +
+      reloadRoll +
+      walkBobX * 1.8 +
+      runSwing * 0.052;
+    const rotationAlpha = 1 - Math.exp(-dt * (this.sprintBlend > 0.01 ? 13 : 16));
+    this.viewModel.rotation.x = THREE.MathUtils.lerp(this.viewModel.rotation.x, targetRotX, rotationAlpha);
+    this.viewModel.rotation.y = THREE.MathUtils.lerp(this.viewModel.rotation.y, targetRotY, rotationAlpha);
+    this.viewModel.rotation.z = THREE.MathUtils.lerp(this.viewModel.rotation.z, targetRotZ, rotationAlpha);
 
     // Aiming solves for the pose instead of nudging it: the optic's centre is
     // pushed onto the view axis at a fixed depth, so whatever the archetype uses -
     // red dot, scope or open iron sights - it frames exactly what the crosshair
     // frames. Hip pose and solved pose are blended by `ads`, so raising the weapon
     // is one continuous move rather than a jump between two anchors.
+    const base = this.viewModel.position;
     if (this.ads > 0.001 && this.gun) {
       const sightLocal = TEMP_SIGHT.copy(this.gun.sights.position)
         .multiplyScalar(this.gun.group.scale.z || 1)
@@ -447,7 +510,10 @@ export class WeaponController {
       base.lerpVectors(base, TEMP_AIM_TARGET, this.ads);
     }
 
-    this.viewCamera.fov = THREE.MathUtils.lerp(55, ADS_VIEWMODEL_FOV, this.ads);
+    // A slight viewmodel FOV increase while sprinting makes the lowered gun read
+    // as farther from the face without touching the user's world FOV setting.
+    const hipFov = 55 + this.sprintBlend * 3;
+    this.viewCamera.fov = THREE.MathUtils.lerp(hipFov, ADS_VIEWMODEL_FOV, this.ads);
     this.viewCamera.updateProjectionMatrix();
 
     // World-space muzzle position for tracers and effects.
