@@ -242,7 +242,11 @@ export class GameApp {
     // Look first so aim is current before any shot is resolved.
     const look = this.controller.consumeLook();
     if (!frozen) {
-      this.controller.look(look.dx, look.dy, this.settings.sensitivity, this.settings.invertY);
+      // Scoping in magnifies the world, so mouse travel is divided by the zoom to
+      // keep aim distance 1:1 with the crosshair; otherwise a sniper scope would
+      // feel like the camera had seized up.
+      const zoomScale = 1 / Math.max(1, this.weapons.aimZoom);
+      this.controller.look(look.dx, look.dy, this.settings.sensitivity * zoomScale, this.settings.invertY);
     }
 
     if (!frozen) this.controller.update(dt);
@@ -265,7 +269,8 @@ export class GameApp {
       firePressed: input.firePressed && !frozen,
       aiming: input.aiming && !frozen,
     });
-    this.hud.setAiming(this.weapons.isAiming);
+    // Aim feedback (crosshair, scope mask, zoom readout) is driven inside
+    // hud.update from the weapon controller's eased blend.
 
     this.enemies.update(dt, {
       damagePlayer: (amount) => this.damagePlayer(amount),
@@ -1130,8 +1135,10 @@ export class GameApp {
   private applySettings(next: SettingsState, immediate = false): void {
     this.settings = { ...next };
     audio.setVolume(this.settings.masterVolume);
-    this.camera.fov = this.settings.fov;
-    this.camera.updateProjectionMatrix();
+    // Aiming zooms the world camera too, so the weapon controller owns the FOV and
+    // divides the aim factor into this base value. Setting it here directly would
+    // fight the zoom every time the settings panel commits.
+    this.weapons.setBaseFov(this.settings.fov);
     this.effects.useDynamicLights = this.settings.quality !== 'low';
     this.renderer.shadowMap.enabled = this.settings.quality === 'high';
     this.renderer.setPixelRatio(this.settings.quality === 'low' ? 1 : Math.min(window.devicePixelRatio, 2));

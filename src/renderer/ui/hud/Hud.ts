@@ -205,13 +205,57 @@ export class Hud {
     this.interact.style.color = RARITY_COLORS[payload.rarity] ?? '';
   }
 
-  setAiming(isAiming: boolean): void {
-    if (this.root) this.root.classList.toggle('aiming', isAiming);
+  private adsOverlay = byId('hud-ads');
+  private adsZoomLabel = byId('ads-zoom');
+  private crosshair = byId('hud-crosshair');
+  /** Aim classes currently on #hud, so each frame only the changes are applied. */
+  private adsClasses = new Set<string>();
+
+  /**
+   * Drives every aim-related HUD piece: the crosshair, the scope mask and the
+   * weapon panel dim. Reads the eased blend from the weapon controller so the HUD
+   * and the gun always transition together.
+   */
+  setAiming(aim: { blend: number; zoom: number; optics: 'none' | 'red-dot' | 'optic' | 'scope' }): void {
+    if (!this.root) return;
+    const scoped = aim.optics === 'scope';
+    const wanted = new Set<string>([
+      ...(aim.blend > 0.5 ? ['aiming'] : []),
+      ...(aim.blend > 0.02 ? ['aiming-active'] : []),
+      ...(scoped ? ['scoped'] : []),
+      ...((aim.optics === 'red-dot' || aim.optics === 'optic') && aim.blend > 0.02 ? ['reddot'] : []),
+    ]);
+    for (const cls of this.adsClasses) {
+      if (!wanted.has(cls)) this.root.classList.remove(cls);
+    }
+    for (const cls of wanted) {
+      if (!this.adsClasses.has(cls)) this.root.classList.add(cls);
+    }
+    this.adsClasses = wanted;
+    if (this.adsOverlay) {
+      // Drive the mask opacity straight from the blend: the weapon easing is
+      // frame-based and a CSS transition would always lag it by a fixed time.
+      this.adsOverlay.style.opacity = (aim.blend * (scoped ? 1 : 0.55)).toFixed(2);
+    }
+    if (this.crosshair) {
+      // Iron-sight weapons keep the dot as an aim reference; a scoped rifle puts
+      // its own reticle on the target, so the HUD lines get out of the way.
+      this.crosshair.classList.toggle('scoped-out', aim.blend > 0.75 && scoped);
+    }
+    if (this.adsZoomLabel) {
+      const text = aim.zoom > 1.05 ? `${aim.zoom.toFixed(1)}x` : '';
+      if (this.adsZoomLabel.textContent !== text) this.adsZoomLabel.textContent = text;
+    }
   }
 
   /** Called every frame while playing. */
   update(dt: number, abilityCooldowns: { f: number; fTotal: number; q: number; qTotal: number; fActive: boolean }): void {
     this.now += dt;
+    this.setAiming({
+      blend: this.weapons.aimBlend,
+      zoom: this.weapons.aimZoom,
+      optics: this.weapons.opticsKind,
+    });
 
     const vitals = this.player.snapshot();
     setBar(this.healthBar, this.healthText, vitals.health / Math.max(1, vitals.maxHealth), `${Math.ceil(vitals.health)}`);

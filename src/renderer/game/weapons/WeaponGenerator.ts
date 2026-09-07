@@ -112,6 +112,7 @@ export function generateWeapon(options: GenerateOptions = {}): Weapon {
     auto: base.fireRate >= 4,
     shake: base.shake,
     falloff: base.falloff,
+    adsZoom: base.adsZoom,
     modelColor: base.modelColor,
     modelScale: base.modelScale,
     modifiers,

@@ -43,7 +43,18 @@ export interface WeaponHudState {
  * would otherwise apply to something that near.
  */
 const VIEWMODEL_OFFSET = new THREE.Vector3(0.19, -0.17, -0.38);
+/** Transitional aim pose; the final position is solved onto the view axis. */
 const AIM_OFFSET = new THREE.Vector3(0, -0.08, -0.26);
+/**
+ * How far in front of the eye the optic sits while aiming. The sight anchor is
+ * solved onto the view axis at exactly this depth, so the optic - red dot,
+ * scope or iron notch - lands on the crosshair instead of beside it.
+ */
+const ADS_SIGHT_DEPTH = 0.3;
+/** Viewmodel projection while aimed; narrower than the hip 55 deg. */
+const ADS_VIEWMODEL_FOV = 44;
+/** Blend rate per second for the ADS pose and the world zoom. */
+const ADS_BLEND_RATE = 13;
 
 export class WeaponController {
   readonly slots: (Weapon | null)[] = [null, null, null];
@@ -52,6 +63,16 @@ export class WeaponController {
   reloading = false;
   reloadProgress = 0;
   isAiming = false;
+  /**
+   * Aiming-down-sights blend: 0 at the hip, 1 fully on the sights. Drives the
+   * world zoom, the viewmodel FOV and the sight alignment together so the three
+   * can never disagree. Eased so raising the weapon reads as motion, not a snap.
+   */
+  private ads = 0;
+  /** Zoom actually applied to the world camera, eased towards `targetAdsZoom`. */
+  private appliedZoom = 1;
+  /** Base world FOV supplied by settings; ADS divides into it. */
+  private baseFov = 78;
 
   /** Recoil offsets, decayed back to zero each frame. */
   private recoilPitch = 0;
@@ -332,6 +353,25 @@ export class WeaponController {
     this.burstPause = Math.max(0, this.burstPause - dt);
     this.isAiming = input.aiming;
 
+    // ADS blend and the world zoom it drives. Zooming the projection (rather than
+    // only sliding the gun) is what makes aiming read as aiming; it is eased so
+    // the screen does not lurch, and clamped so a high base FOV cannot invert it.
+    const adsTarget = this.isAiming && !this.reloading ? 1 : 0;
+    this.ads += (adsTarget - this.ads) * Math.min(1, dt * ADS_BLEND_RATE);
+    if (this.ads < 0.0005) this.ads = 0;
+    if (this.ads > 0.9995) this.ads = 1;
+
+    const held = this.current;
+    const zoom = held ? Math.max(1, held.adsZoom ?? 1) : 1;
+    const wantedZoom = 1 + (zoom - 1) * this.ads;
+    this.appliedZoom += (wantedZoom - this.appliedZoom) * Math.min(1, dt * ADS_BLEND_RATE);
+    if (Math.abs(this.appliedZoom - wantedZoom) < 0.001) this.appliedZoom = wantedZoom;
+    const fov = this.baseFov / this.appliedZoom;
+    if (Math.abs(this.camera.fov - fov) > 0.001) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
     if (this.reloading) {
       const weapon = this.current;
       const duration = weapon ? weapon.reloadTime * context.reloadTimeMultiplier : 2;
@@ -353,7 +393,6 @@ export class WeaponController {
     this.viewCamera.position.setFromMatrixPosition(this.camera.matrixWorld);
     this.viewCamera.quaternion.setFromRotationMatrix(this.camera.matrixWorld);
     this.viewCamera.aspect = this.camera.aspect;
-    this.viewCamera.updateProjectionMatrix();
 
     const weapon = this.current;
     if (!weapon) {
@@ -365,8 +404,10 @@ export class WeaponController {
     const speed = Math.hypot(this.controller.velocity.x, this.controller.velocity.z);
     const moveAmount = Math.min(1, speed / Math.max(1, this.player.stats.sprintSpeed));
     this.bobPhase += dt * (7 + moveAmount * 6);
-    const bobX = Math.cos(this.bobPhase) * 0.008 * moveAmount;
-    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.009 * moveAmount;
+    // Standing still steadies the hands; aiming wants the gun rock steady.
+    const steadiness = moveAmount * (1 - this.ads * 0.75);
+    const bobX = Math.cos(this.bobPhase) * 0.008 * steadiness;
+    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.009 * steadiness;
 
     const target = this.isAiming ? AIM_OFFSET : VIEWMODEL_OFFSET;
     const base = this.viewModel.position;
@@ -387,10 +428,27 @@ export class WeaponController {
 
     const swayTargetX = THREE.MathUtils.clamp(-this.controller.velocity.x * 0.004, -0.02, 0.02);
     const swayTargetY = THREE.MathUtils.clamp(-this.controller.velocity.z * 0.003, -0.02, 0.02);
-    this.swayX = THREE.MathUtils.lerp(this.swayX, swayTargetX, Math.min(1, dt * 6));
-    this.swayY = THREE.MathUtils.lerp(this.swayY, swayTargetY, Math.min(1, dt * 6));
+    const swayDamp = 1 - this.ads;
+    this.swayX = THREE.MathUtils.lerp(this.swayX, swayTargetX * swayDamp, Math.min(1, dt * 6));
+    this.swayY = THREE.MathUtils.lerp(this.swayY, swayTargetY * swayDamp, Math.min(1, dt * 6));
     this.viewModel.position.x += this.swayX;
     this.viewModel.position.y += this.swayY;
+
+    // Aiming solves for the pose instead of nudging it: the optic's centre is
+    // pushed onto the view axis at a fixed depth, so whatever the archetype uses -
+    // red dot, scope or open iron sights - it frames exactly what the crosshair
+    // frames. Hip pose and solved pose are blended by `ads`, so raising the weapon
+    // is one continuous move rather than a jump between two anchors.
+    if (this.ads > 0.001 && this.gun) {
+      const sightLocal = TEMP_SIGHT.copy(this.gun.sights.position)
+        .multiplyScalar(this.gun.group.scale.z || 1)
+        .applyQuaternion(this.viewModel.quaternion);
+      TEMP_AIM_TARGET.set(0, 0, -ADS_SIGHT_DEPTH).sub(sightLocal);
+      base.lerpVectors(base, TEMP_AIM_TARGET, this.ads);
+    }
+
+    this.viewCamera.fov = THREE.MathUtils.lerp(55, ADS_VIEWMODEL_FOV, this.ads);
+    this.viewCamera.updateProjectionMatrix();
 
     // World-space muzzle position for tracers and effects.
     const gun = this.gun;
@@ -507,8 +565,30 @@ export class WeaponController {
     }
   }
 
+  /**
+   * 0 at the hip, 1 fully on the sights. HUD and camera code read this instead of
+   * the raw key state so their transitions match the weapon's exactly.
+   */
   get aimBlend(): number {
-    return this.isAiming ? 1 : 0;
+    return this.ads;
+  }
+
+  /** Current world zoom, e.g. 2.9 for an aimed sniper. Never below 1. */
+  get aimZoom(): number {
+    return this.appliedZoom;
+  }
+
+  /** Optic fitted to the equipped weapon, selecting the HUD reticle. */
+  get opticsKind(): 'none' | 'red-dot' | 'optic' | 'scope' {
+    return this.gun?.optics ?? 'none';
+  }
+
+  /**
+   * World FOV at the hip. Settings own this value; aiming divides into it so the
+   * player's FOV preference and the zoom always compose correctly.
+   */
+  setBaseFov(fov: number): void {
+    this.baseFov = fov;
   }
 
   /**
@@ -537,3 +617,5 @@ export class WeaponController {
 }
 
 const TEMP_TARGET = new THREE.Vector3();
+const TEMP_SIGHT = new THREE.Vector3();
+const TEMP_AIM_TARGET = new THREE.Vector3();

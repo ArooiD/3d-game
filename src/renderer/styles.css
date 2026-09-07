@@ -502,6 +502,51 @@ body {
 #hud.aiming .ch-b { height: 3px; }
 #hud.aiming .weapon-panel { opacity: 0.55; }
 
+/* ---------------- aim-down-sights overlay ---------------- */
+.ads-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  display: none;
+}
+
+#hud.aiming-active .ads-overlay { display: block; }
+
+/* Red-dot / iron weapons: just a soft tunnel that keeps the frame on center. */
+.ads-overlay .ads-line-h,
+.ads-overlay .ads-line-v { display: none; }
+
+#hud.reddot .ads-overlay {
+  background: radial-gradient(circle closest-side at 50% 50%, transparent 55%, rgba(4, 6, 10, 0.6) 96%);
+}
+
+/* Scoped weapons: circular mask, crosshair hairlines, magnification readout. */
+#hud.scoped .ads-overlay {
+  background: radial-gradient(circle closest-side at 50% 50%, transparent 0 62%, rgba(2, 3, 6, 0.97) 67%);
+}
+
+#hud.scoped .ads-line-h,
+#hud.scoped .ads-line-v {
+  display: block;
+  position: absolute;
+  background: rgba(10, 14, 18, 0.9);
+}
+
+#hud.scoped .ads-line-h { left: 50%; top: 13.5%; width: 1.5px; height: 26%; transform: translateX(-50%); }
+#hud.scoped .ads-line-v { top: 50%; left: 13.5%; height: 1.5px; width: 26%; transform: translateY(-50%); }
+
+.ads-zoom {
+  position: absolute;
+  left: calc(50% + 2px);
+  top: calc(50% + 8px);
+  font-size: 11px;
+  color: rgba(210, 235, 255, 0.75);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
+#hud.scoped #hud-crosshair.scoped-out .ch { opacity: 0; }
+
 /* ---------------- level up ---------------- */
 .levelup-banner {
   position: fixed;
@@ -1276,7 +1321,6 @@ input[type='range']::-webkit-slider-thumb {
   border: 1px solid rgba(0, 0, 0, 0.75);
   border-radius: 2px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-  overflow: hidden;
   will-change: transform;
 }
 
@@ -1300,6 +1344,33 @@ input[type='range']::-webkit-slider-thumb {
   background: linear-gradient(90deg, #c02f2f, var(--health));
   z-index: 1;
 }
+
+/* Name + level of the enemy under the crosshair, floated above its bar. The bar
+   itself clips the fills, so the label rides on a sibling-style child that the
+   bar's overflow is allowed to show (the bar box is sized to the label layer). */
+.hpbar-label {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  color: #e8f2fa;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 6px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.hpbar-label.empty { display: none; }
+
+.hpbar.focused {
+  width: 74px;
+  height: 7px;
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), 0 0 8px rgba(255, 210, 120, 0.35);
+}
+
+.hpbar.focused .hpbar-label { color: #ffe6b0; }
 
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); }

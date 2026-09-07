@@ -14,6 +14,8 @@ import { RARITY_HEX } from '../../../shared/constants';
  * Convention: the gun points down -Z, the grip sits near the origin, up is +Y.
  */
 
+export type OpticKind = 'none' | 'red-dot' | 'optic' | 'scope';
+
 export interface GunModelOptions {
   /** 'high' for the viewmodel, 'low' for ground drops and previews. */
   detail?: 'high' | 'low';
@@ -29,6 +31,13 @@ export interface GunModel {
   group: THREE.Group;
   /** Muzzle anchor in gun space; already positioned at the barrel tip. */
   muzzle: THREE.Object3D;
+  /**
+   * Optical centre in gun space: the point that must land on the crosshair when
+   * aiming. Iron sights use the line between post and notch, optics the lens.
+   */
+  sights: THREE.Object3D;
+  /** Optic fitted to this archetype, driving the HUD overlay while aiming. */
+  optics: OpticKind;
   /** Parts driven by reload/inspect animation. */
   magazine: THREE.Object3D | null;
   bolt: THREE.Object3D | null;
@@ -70,7 +79,7 @@ interface Layout {
   magazineZ: number;
   gripLength: number;
   foregrip: boolean;
-  scope: 'none' | 'red-dot' | 'optic' | 'scope';
+  scope: OpticKind;
   pump: boolean;
   sideBySide: boolean;
   overallLength: number;
@@ -495,6 +504,24 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
     hand(support, -1, { length: 0.27, roll: 0.36, yaw: -0.5 });
   }
 
+  // Sighting anchor. Aiming parks this point on the view axis, so every archetype
+  // - iron sights included - ends up pointing exactly where the crosshair is.
+  const sights = new THREE.Object3D();
+  sights.name = 'sights';
+  const sightAnchorY = layout.receiverY + layout.receiver[1] * 0.5 + 0.018;
+  if (layout.scope === 'scope') {
+    sights.position.set(0, sightAnchorY + 0.032 * 1.3, layout.receiverZ - layout.receiver[2] * 0.05);
+  } else if (layout.scope === 'red-dot' || layout.scope === 'optic') {
+    const depth = layout.scope === 'optic' ? 0.037 : 0.026;
+    sights.position.set(0, sightAnchorY + 0.022, layout.receiverZ - layout.receiver[2] * 0.12 - depth);
+  } else {
+    // Iron sights: weighted toward the rear notch, at post/notch height.
+    const frontZ = layout.receiverZ - layout.receiver[2] * 0.42;
+    const rearZ = layout.receiverZ + layout.receiver[2] * 0.28;
+    sights.position.set(0, sightAnchorY + 0.011, frontZ * 0.35 + rearZ * 0.65);
+  }
+  group.add(sights);
+
   const muzzle = new THREE.Object3D();
   muzzle.name = 'muzzle';
   muzzle.position.set(0, layout.barrelY, muzzleTipZ - layout.barrelLength * 0.02);
@@ -503,6 +530,8 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
   return {
     group,
     muzzle,
+    sights,
+    optics: layout.scope,
     magazine,
     bolt,
     slide,

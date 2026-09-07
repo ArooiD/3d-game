@@ -25,6 +25,13 @@
         <i id="hitmarker" class="hitmarker"></i>
       </div>
 
+      <!-- Aim overlay: scope mask for snipers, light vignette for red dots.
+           Fades with the ADS blend through a CSS transition. -->
+      <div id="hud-ads" class="ads-overlay">
+        <span class="ads-line-h"></span><span class="ads-line-v"></span>
+        <span class="ads-zoom" id="ads-zoom"></span>
+      </div>
+
       <div id="hud-interact" class="interact-prompt hidden">
         <b>E</b><span id="interact-label">Pick up</span>
       </div>

@@ -60,6 +60,11 @@ export class Enemy implements TargetRegistry {
   damage: number;
   moveSpeed: number;
   alive = true;
+  /**
+   * Player level the enemy was scaled against at spawn time. Shown on the
+   * overhead bar so a level 3 raider reads as a level 3 threat.
+   */
+  level = 1;
   /** Seconds the corpse stays before despawn. */
   private corpseTimer = 0;
   private stateTimer = 0;

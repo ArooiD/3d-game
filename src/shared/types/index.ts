@@ -56,6 +56,8 @@ export interface WeaponStats {
   shake: number;
   /** Fraction of damage removed past 60% of effective range. */
   falloff: number;
+  /** Field of view divider while aiming down sights. */
+  adsZoom: number;
   /** Model tint + size for the first-person viewmodel. */
   modelColor: number;
   modelScale: [number, number, number];

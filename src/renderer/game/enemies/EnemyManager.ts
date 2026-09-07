@@ -37,6 +37,11 @@ export interface EnemyEvents {
 
 const ENGAGED = new Set(['alert', 'chase', 'attack', 'retreat']);
 
+/** Seconds a focus label survives leaving the aim cone, to avoid strobing. */
+const FOCUS_HOLD = 0.25;
+const FOCUS_DIR = new THREE.Vector3();
+const FOCUS_TO = new THREE.Vector3();
+
 export class EnemyManager {
   readonly enemies: Enemy[] = [];
   readonly targets = new TargetGrid();
@@ -47,6 +52,9 @@ export class EnemyManager {
   private killQueue: { definitionId: string; byPlayer: boolean; isBoss: boolean; isElite: boolean; position: THREE.Vector3 }[] = [];
   private losRaycaster = new THREE.Ray();
   private scratch = new THREE.Vector3();
+  /** Enemy currently under the crosshair, driving the label on its health bar. */
+  private focusTarget: Enemy | null = null;
+  private focusHold = 0;
 
   constructor(
     private scene: THREE.Scene,
@@ -119,6 +127,7 @@ export class EnemyManager {
     const scale = scaleForLevel(playerLevel);
     const built = this.factory.create(definition);
     const enemy = new Enemy(definition, scale, built);
+    enemy.level = Math.max(1, Math.round(playerLevel));
     const y = request.y ?? this.groundY(request.x, request.z);
     enemy.place(request.x, y, request.z);
     enemy.bossMinion = Boolean(request.bossMinion);
@@ -175,6 +184,8 @@ export class EnemyManager {
     }
     this.enemies.length = 0;
     this.killQueue.length = 0;
+    this.focusTarget = null;
+    this.focusHold = 0;
     this.targets.clear();
   }
 
@@ -241,23 +252,33 @@ export class EnemyManager {
 
     // Kills are reported through the bus; collect them for external systems.
     this.targets.rebuild();
-    this.updateHealthBars();
+    this.updateHealthBars(dt);
     void this.losRaycaster;
     void time;
   }
 
-  private updateHealthBars(): void {
-    const entries: { object: THREE.Object3D; offsetY: number }[] = [];
+  private updateHealthBars(dt: number): void {
+    const focused = this.updateFocus(dt);
+    const entries: { object: THREE.Object3D; offsetY: number; label?: string; focused?: boolean }[] = [];
     const sorted = this.enemies
       // Show the bar once a foe is engaged, not only after the first hit: a bar
       // that pops in mid-fight is easier to read than one that is missing while
-      // you are deciding which target to shoot.
+      // you are deciding which target to shoot. A foe under the crosshair always
+      // gets one - the player is asking "what am I looking at?".
       .filter((enemy) => enemy.alive
-        && (enemy.health < enemy.maxHealth || enemy.shield < enemy.maxShield
+        && (enemy === focused || enemy.health < enemy.maxHealth || enemy.shield < enemy.maxShield
           || ENGAGED.has(enemy.state) || enemy.isBoss))
       .sort((a, b) => a.distanceTo(this.cameraPos()) - b.distanceTo(this.cameraPos()));
     for (const enemy of sorted.slice(0, 20)) {
-      entries.push({ object: enemy.group, offsetY: enemy.definition.height + 0.6 });
+      const isFocus = enemy === focused;
+      entries.push({
+        object: enemy.group,
+        offsetY: enemy.definition.height + 0.95,
+        focused: isFocus,
+        // Name + level belong to the focused bar only; permanent labels over every
+        // raider would clutter the screen.
+        label: isFocus ? `${enemy.definition.name} · LV ${enemy.level}` : undefined,
+      });
     }
     this.healthBars.assign(entries);
     this.healthBars.update(this.camera, (object) => {
@@ -272,6 +293,52 @@ export class EnemyManager {
         hidden: far,
       };
     });
+  }
+
+  /**
+   * The enemy the player is currently aiming at: the alive target whose body
+   * covers the crosshair ray with the smallest angular offset and which is not
+   * hidden behind cover. Held briefly after leaving the cone so the label does not
+   * strobe while tracking a moving target.
+   */
+  private updateFocus(dt: number): Enemy | null {
+    this.camera.getWorldDirection(FOCUS_DIR);
+    const origin = this.camera.position;
+    let best: Enemy | null = null;
+    let bestAngle = Number.POSITIVE_INFINITY;
+    let bestDist = 0;
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      FOCUS_TO.set(enemy.position.x - origin.x, enemy.headY - 0.25 - origin.y, enemy.position.z - origin.z);
+      const dist = FOCUS_TO.length();
+      if (dist < 0.001) continue;
+      FOCUS_TO.divideScalar(dist);
+      const cos = THREE.MathUtils.clamp(FOCUS_TO.dot(FOCUS_DIR), -1, 1);
+      const angle = Math.acos(cos);
+      // Angular radius of the target, plus a small grace window so crosshair
+      // placement near an edge still counts as aiming at it.
+      const limit = Math.atan2(enemy.radius + 0.35, dist);
+      if (angle <= limit && angle < bestAngle) {
+        best = enemy;
+        bestAngle = angle;
+        bestDist = dist;
+      }
+    }
+    // The candidate must be shootable: cover between eye and target wins.
+    if (best) {
+      const hit = this.collision.raycast(origin, FOCUS_DIR, bestDist - 0.4);
+      if (hit) best = null;
+    }
+    if (best) {
+      this.focusTarget = best;
+      this.focusHold = FOCUS_HOLD;
+    } else if (this.focusTarget && this.focusHold > 0) {
+      this.focusHold -= dt;
+      if (!this.focusTarget.alive || this.focusHold <= 0) this.focusTarget = null;
+    } else {
+      this.focusTarget = null;
+    }
+    return this.focusTarget;
   }
 
   private cameraPos(): THREE.Vector3 {

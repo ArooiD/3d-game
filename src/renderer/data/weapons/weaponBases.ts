@@ -32,6 +32,11 @@ export interface WeaponBase {
   shake: number;
   /** Damage falloff past 60% of range (0..1 fraction removed). */
   falloff: number;
+  /**
+   * Field of view divider while aiming: 1.5 draws the world 1.5x closer.
+   * Scoped weapons zoom most; a shotgun barely needs any.
+   */
+  adsZoom: number;
   modelColor: number;
   modelScale: [number, number, number];
 }
@@ -55,6 +60,7 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
     shieldDamageBonus: 0,
     shake: 0.22,
     falloff: 0.3,
+    adsZoom: 1.3,
     modelColor: 0x9aa6b8,
     modelScale: [0.1, 0.16, 0.42],
   },
@@ -76,6 +82,7 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
     shieldDamageBonus: 0,
     shake: 0.24,
     falloff: 0.28,
+    adsZoom: 1.55,
     modelColor: 0x7f8b9e,
     modelScale: [0.11, 0.17, 0.78],
   },
@@ -97,6 +104,7 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
     shieldDamageBonus: 0,
     shake: 0.85,
     falloff: 0.62,
+    adsZoom: 1.2,
     modelColor: 0x8c6f4f,
     modelScale: [0.14, 0.19, 0.92],
   },
@@ -118,6 +126,7 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
     shieldDamageBonus: 0.15,
     shake: 1.1,
     falloff: 0,
+    adsZoom: 2.9,
     modelColor: 0x5d6f86,
     modelScale: [0.1, 0.15, 1.22],
   },
@@ -139,6 +148,7 @@ export const WEAPON_BASES: Record<WeaponType, WeaponBase> = {
     shieldDamageBonus: 0,
     shake: 0.16,
     falloff: 0.42,
+    adsZoom: 1.4,
     modelColor: 0x6f7d8c,
     modelScale: [0.1, 0.15, 0.55],
   },

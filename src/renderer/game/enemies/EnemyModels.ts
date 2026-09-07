@@ -410,6 +410,7 @@ export class HealthBarPool {
     el: HTMLDivElement;
     fill: HTMLElement;
     shield: HTMLElement;
+    label: HTMLDivElement;
     target: THREE.Object3D | null;
     offsetY: number;
   }[] = [];
@@ -424,13 +425,18 @@ export class HealthBarPool {
       fill.className = 'hpbar-fill';
       el.appendChild(shield);
       el.appendChild(fill);
+      // Name + level rides above the bar, so a glance identifies the target
+      // before any damage has been dealt.
+      const label = document.createElement('div');
+      label.className = 'hpbar-label';
+      el.appendChild(label);
       this.overlay.appendChild(el);
-      this.bars.push({ el, fill, shield, target: null, offsetY: 0 });
+      this.bars.push({ el, fill, shield, label, target: null, offsetY: 0 });
     }
   }
 
   /** Assign bars to the nearest `count` targets that are hurt. */
-  assign(entries: { object: THREE.Object3D; offsetY: number }[]): void {
+  assign(entries: { object: THREE.Object3D; offsetY: number; label?: string; focused?: boolean }[]): void {
     for (let i = 0; i < this.bars.length; i++) {
       const bar = this.bars[i] as (typeof this.bars)[number];
       const entry = entries[i];
@@ -441,6 +447,9 @@ export class HealthBarPool {
       }
       bar.target = entry.object;
       bar.offsetY = entry.offsetY;
+      if (bar.label.textContent !== entry.label) bar.label.textContent = entry.label ?? '';
+      bar.label.classList.toggle('empty', !entry.label);
+      bar.el.classList.toggle('focused', entry.focused === true);
       bar.el.classList.remove('hidden');
     }
   }
