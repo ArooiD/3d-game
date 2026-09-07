@@ -457,7 +457,7 @@ export class EffectsSystem {
     return point;
   }
 
-  private damageAnchor(payload: EnemyPartVisualEvent): THREE.Object3D | null {
+  private damageAnchor(payload: EnemyPartVisualEvent): THREE.Object3D | undefined {
     switch (payload.part) {
       case 'head':
         return payload.root.getObjectByName('head');
