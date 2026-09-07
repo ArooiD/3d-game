@@ -79,6 +79,33 @@ const BONES = [
   'footR',
 ] as const satisfies readonly BoneName[];
 
+/**
+ * Persistent two-handed low-ready pose for ordinary ranged enemies.
+ *
+ * Enemy gun geometry is parented to forearmR. That means simply bending the
+ * elbow forward also rotates the whole gun upward. The correct pose is a paired
+ * shoulder/elbow solve: the upper arm swings forward while the forearm counter-
+ * rotates by nearly the same amount. The hand therefore moves up in front of the
+ * chest while the weapon itself keeps pointing along the actor's forward axis.
+ *
+ * The left arm uses the same solve but reaches a little farther so it visibly
+ * supports the foregrip instead of hanging beside the body. This layer stays on
+ * during idle, patrol and chase; ADS then blends on top of it.
+ */
+function rangedCarryAdd(P: Pose, weight = 1, combatReady = false): void {
+  const ready = combatReady ? 1 : 0.9;
+  const w = weight * ready;
+
+  P.add('chest', combatReady ? 1.5 : 0.5, 0, 0, w);
+  P.add('shoulderR', -3, -1, 4, w);
+  P.add('armR', 43, -2, 2, w);
+  P.add('forearmR', -31, 1, 0, w);
+
+  P.add('shoulderL', -4, 2, -7, w);
+  P.add('armL', 47, 3, -3, w);
+  P.add('forearmL', -34, -2, 0, w);
+}
+
 export class EnemyAnimator {
   /** Stride phase, advanced by measured distance so footsteps match speed. */
   private phase: number;
@@ -172,6 +199,19 @@ export class EnemyAnimator {
 
     // --- additive combat layers --------------------------------------------
     this.aimWeight += ((context.aiming ? 1 : 0) - this.aimWeight) * (1 - Math.exp(-dt * 12));
+
+    // Raider/heavy/sniper weapons used to hang from the right hand because the
+    // default rig only raised the arms while actively shooting. Keep a two-hand
+    // carry pose alive for every ordinary ranged enemy, then reduce its weight
+    // while the stronger ADS pose takes over. Boss weapons are integrated into
+    // their forearms and deliberately keep the boss-specific animation.
+    if (!context.melee && !context.boss) {
+      const carryWeight = 1 - this.aimWeight * 0.55;
+      const combatReady = context.state === 'alert' || context.state === 'chase' ||
+        context.state === 'attack' || context.state === 'retreat';
+      rangedCarryAdd(layer, carryWeight, combatReady);
+    }
+
     if (this.aimWeight > .001) aimAdd(layer, .9 * this.aimWeight);
     if (context.braced) braceAdd(layer, 1);
     if (context.crouched) crouchAdd(layer, 1);
