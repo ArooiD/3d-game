@@ -44,7 +44,9 @@ test('EnemyParts resolves animated head and arm hit zones', () => {
   const forearm = built.skeleton.bones.get('forearmR')!;
   const upper = Math.max(definition.height * 0.12, Math.abs(forearm.position.y));
   const armPoint = new THREE.Vector3(0, -upper * 0.35, 0).applyMatrix4(arm.matrixWorld);
-  const armOrigin = armPoint.clone().add(new THREE.Vector3(0, 0, -4));
+  // Shoot inward from the exposed right side. A frontal ray through this point can
+  // legitimately enter the overlapping chest volume first at some idle poses.
+  const armOrigin = armPoint.clone().add(new THREE.Vector3(4, 0, 0));
   const armDir = armPoint.clone().sub(armOrigin).normalize();
   const armHit = parts.rayHit(armOrigin, armDir, 8);
   assert.equal(armHit?.part, 'armR');
