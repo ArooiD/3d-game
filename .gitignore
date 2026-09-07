@@ -3,6 +3,11 @@ dist/
 *.log
 .agent_tmp/
 .DS_Store
+/.idea/.gitignore
+/.idea/3d-game.iml
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/vcs.xml
 
 # agent memory
 AGENTS.md
