@@ -38,17 +38,21 @@ const GRID = 12;
 export class TargetGrid {
   private cells = new Map<string, TargetRegistry[]>();
   private all = new Set<TargetRegistry>();
+  private dirty = true;
 
   register(target: TargetRegistry): void {
     this.all.add(target);
+    this.dirty = true;
   }
 
   unregister(target: TargetRegistry): void {
     this.all.delete(target);
+    this.dirty = true;
   }
 
   clear(): void {
     this.all.clear();
+    this.dirty = true;
     this.cells.clear();
   }
 
@@ -63,13 +67,15 @@ export class TargetGrid {
   /** Rebuild the grid for this frame (positions change constantly). */
   rebuild(): void {
     this.cells.clear();
+    this.dirty = false;
     for (const target of this.all) {
       if (!target.alive) continue;
       const c = target.centre;
-      const key = `${Math.floor(c.x / GRID)},${Math.floor(c.z / GRID)}`;
-      const bucket = this.cells.get(key);
-      if (bucket) bucket.push(target);
-      else this.cells.set(key, [target]);
+      for (const key of this.cellKeys(c, target.radius)) {
+        const bucket = this.cells.get(key);
+        if (bucket) bucket.push(target);
+        else this.cells.set(key, [target]);
+      }
     }
   }
 
@@ -86,12 +92,15 @@ export class TargetGrid {
   }
 
   querySphere(center: THREE.Vector3, radius: number, hostileOnly = false): TargetRegistry[] {
-    this.rebuild();
+    if (this.dirty) this.rebuild();
     const out: TargetRegistry[] = [];
+    const seen = new Set<TargetRegistry>();
     for (const key of this.cellKeys(center, radius)) {
       const bucket = this.cells.get(key);
       if (!bucket) continue;
       for (const target of bucket) {
+        if (!target.alive || seen.has(target)) continue;
+        seen.add(target);
         if (hostileOnly && !target.hostile) continue;
         if (target.distanceTo(center) <= radius + target.radius) out.push(target);
       }
@@ -101,7 +110,7 @@ export class TargetGrid {
 
   /** Targets whose bounding cylinder is within `maxDistance` along the ray. */
   queryRay(origin: THREE.Vector3, dir: THREE.Vector3, maxDistance: number): TargetRegistry[] {
-    this.rebuild();
+    if (this.dirty) this.rebuild();
     const out: TargetRegistry[] = [];
     const seen = new Set<string>();
     // Sample the ray so we touch every grid cell it passes through.
@@ -113,7 +122,7 @@ export class TargetGrid {
         const bucket = this.cells.get(key);
         if (!bucket) continue;
         for (const target of bucket) {
-          if (!target.hostile || seen.has(target.id)) continue;
+          if (!target.alive || !target.hostile || seen.has(target.id)) continue;
           seen.add(target.id);
           out.push(target);
         }
@@ -151,7 +160,7 @@ export class TargetGrid {
   }
 }
 
-/** Capsule (cylinder + head sphere) ray test shared by all targets. */
+/** Finite vertical cylinder ray test; the upper region counts as a headshot. */
 export function rayCylinder(
   origin: THREE.Vector3,
   dir: THREE.Vector3,
@@ -161,58 +170,28 @@ export function rayCylinder(
   headY: number,
   maxDistance: number,
 ): { distance: number; headshot: boolean } | null {
-  // Infinite cylinder around the vertical axis through center.
-  const ox = origin.x - center.x;
-  const oz = origin.z - center.z;
-  const dx = dir.x;
-  const dz = dir.z;
-  const a = dx * dx + dz * dz;
-  let tEnter = Number.POSITIVE_INFINITY;
-
-  if (a > 1e-9) {
-    const b = 2 * (ox * dx + oz * dz);
-    const c = ox * ox + oz * oz - radius * radius;
-    const disc = b * b - 4 * a * c;
+  const ox = origin.x - center.x, oz = origin.z - center.z;
+  const a = dir.x * dir.x + dir.z * dir.z;
+  const c = ox * ox + oz * oz - radius * radius;
+  let enter = 0, exit = maxDistance;
+  if (a < 1e-12) {
+    if (c > 0) return null;
+  } else {
+    const b = ox * dir.x + oz * dir.z;
+    const disc = b * b - a * c;
     if (disc < 0) return null;
-    const sq = Math.sqrt(disc);
-    const t0 = (-b - sq) / (2 * a);
-    const t1 = (-b + sq) / (2 * a);
-    if (t1 < 0) return null;
-    tEnter = t0 >= 0 ? t0 : t1;
-    if (tEnter > maxDistance) return null;
-  } else if (ox * ox + oz * oz > radius * radius) {
-    // Vertical ray that misses the cylinder entirely.
-    return null;
+    const root = Math.sqrt(disc);
+    enter = Math.max(enter, (-b - root) / a);
+    exit = Math.min(exit, (-b + root) / a);
   }
-
-  const hitY = origin.y + dir.y * tEnter;
-  const headRadius = radius * 0.62;
-  const headCenterY = headY - headRadius;
-
-  if (hitY >= feetY && hitY <= headCenterY - headRadius * 0.2) {
-    return { distance: tEnter, headshot: false };
+  if (Math.abs(dir.y) < 1e-12) {
+    if (origin.y < feetY || origin.y > headY) return null;
+  } else {
+    const first = (feetY - origin.y) / dir.y;
+    const second = (headY - origin.y) / dir.y;
+    enter = Math.max(enter, Math.min(first, second));
+    exit = Math.min(exit, Math.max(first, second));
   }
-
-  // Head sphere test (covers the top of the capsule and slightly above).
-  const oy = origin.y - headCenterY;
-  const dy = dir.y;
-  const b2 = 2 * (ox * dx + oz * dz + oy * dy);
-  const c2 = ox * ox + oz * oz + oy * oy - headRadius * headRadius;
-  const disc2 = b2 * b2 - 4 * (dx * dx + dy * dy + dz * dz) * c2;
-  if (disc2 >= 0) {
-    const sq2 = Math.sqrt(disc2);
-    const aa = dx * dx + dy * dy + dz * dz;
-    const t0 = (-b2 - sq2) / (2 * aa);
-    const t1 = (-b2 + sq2) / (2 * aa);
-    const tHead = t0 >= 0 ? t0 : t1 >= 0 ? t1 : Number.POSITIVE_INFINITY;
-    if (tHead <= maxDistance) return { distance: tHead, headshot: true };
-  }
-
-  if (hitY > headCenterY - headRadius * 0.2 && hitY <= headY && tEnter <= maxDistance) {
-    return { distance: tEnter, headshot: true };
-  }
-  if (tEnter <= maxDistance && hitY >= feetY && hitY <= headY) {
-    return { distance: tEnter, headshot: false };
-  }
-  return null;
+  if (enter > exit || exit < 0) return null;
+  return { distance: enter, headshot: origin.y + dir.y * enter >= headY - radius * 1.2 };
 }

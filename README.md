@@ -24,6 +24,7 @@ against it. Stop everything with Ctrl+C.
 ```bash
 npm run build        # typecheck, then bundle main/preload/renderer into dist/
 npm start            # build + run the packaged app from dist/
+npm test             # physics, projectile, navigation and AI regression tests
 npm run typecheck    # tsc --noEmit only
 npm run test:headless # build, then drive the real app under xvfb over CDP
 ```
@@ -111,3 +112,26 @@ packaged build.
 - Single slot for now (`save_slot_1.json`); the save store supports multiple files.
 - Scope deliberately excludes multiplayer, crafting, cloud saves and procedural
   worlds — this is a vertical slice of one outpost.
+
+## Physics and simulation
+
+- Gameplay advances at a fixed 60 Hz, with at most eight catch-up ticks per frame.
+  Input edges survive render-only frames and are consumed once per simulation tick.
+- The static collision world uses spatially indexed AABBs. Character movement uses
+  conservative cylinder bounds and displacement substeps, wall sliding, supported
+  step-up, ceiling stops and gravity. Crouching cannot be released under a low roof;
+  jumps have 120 ms buffering and 100 ms ledge grace. Landing retains horizontal speed.
+- Projectiles sweep their full travel segment against expanded world/body bounds,
+  choose the nearest hit, honor their individual gravity, and damage the opposing
+  side. Cover blocks bullets and splash. Grenades detonate on impact or fuse expiry.
+- Enemies pursue the last visible location and abandon the search after six seconds.
+  A bounded local A* search checks routes with the character collision solver;
+  route requests are throttled. Gravity and knockback run in every living AI state.
+- Target bounds occupy all intersected grid cells. The target index rebuilds after
+  enemy movement, instead of on every pellet query. Effects advance during play.
+
+This is a focused game physics layer, not a general rigid-body engine: movable
+crates, joints, ragdolls, triangle-mesh slopes and dynamic character-to-character
+contacts are not implemented. Navigation uses a bounded local search and does not
+promise routes through arbitrary mazes. `npm test` runs without Electron or a display;
+`npm run test:headless` additionally requires Xvfb and Electron's Linux libraries.

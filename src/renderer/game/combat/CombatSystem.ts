@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Weapon } from '../../../shared/types';
+import { rayCylinder } from '../enemies/TargetRegistry';
 import { rng } from '../core/Rng';
 import type { CollisionWorld } from '../physics/CollisionWorld';
 import type { EffectsSystem } from '../effects/EffectsSystem';
@@ -175,6 +176,7 @@ export class CombatSystem {
       mesh,
       velocity: options.direction.clone().multiplyScalar(options.speed),
       life: options.life ?? 4,
+      gravity: options.gravity ?? 0,
       damage: options.damage,
       shieldBonus: options.shieldBonus ?? 0,
       fromPlayer: options.fromPlayer,
@@ -201,6 +203,7 @@ export class CombatSystem {
       mesh,
       velocity: options.direction.clone().multiplyScalar(options.speed).add(new THREE.Vector3(0, 4.5, 0)),
       life: options.fuse,
+      gravity: 14,
       damage: options.damage,
       shieldBonus: options.shieldBonus,
       fromPlayer: true,
@@ -210,54 +213,45 @@ export class CombatSystem {
     });
   }
 
-  update(dt: number, onPlayerDamage: (amount: number, point: THREE.Vector3) => void): void {
+  update(dt: number, onPlayerDamage: (amount: number, point: THREE.Vector3) => void,
+    player?: { position: THREE.Vector3; radius: number; height: number; alive: boolean }): void {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const projectile = this.projectiles[i];
-      if (!projectile) continue;
+      const projectile = this.projectiles[i]!;
+      const travelTime = Math.min(dt, Math.max(0, projectile.life));
       projectile.life -= dt;
-      projectile.velocity.y -= 14 * dt;
-
-      const step = this.scratch.copy(projectile.velocity).multiplyScalar(dt);
-      const next = projectile.mesh.position.clone().add(step);
-
-      // Advance in small slices so fast rounds cannot tunnel through enemies.
-      const slices = Math.max(1, Math.ceil(step.length() / 0.6));
-      let consumed = false;
-      for (let s = 0; s < slices && !consumed; s++) {
-        const t = (s + 1) / slices;
-        const probe = projectile.mesh.position.clone().addScaledVector(step, t);
-
-        const target = this.targets.sphereHit(probe, projectile.radius, projectile.fromPlayer);
-        if (target) {
-          target.applyDamage(projectile.damage, {
-            headshot: false,
-            critical: projectile.critical,
-            shieldBonus: projectile.shieldBonus,
-            direction: projectile.velocity.clone().normalize(),
-            fromPlayer: projectile.fromPlayer,
-          });
-          this.effects.fleshHit(probe, projectile.critical);
-          consumed = true;
-          break;
+      const origin = projectile.mesh.position.clone();
+      const step = projectile.velocity.clone().multiplyScalar(travelTime);
+      step.y -= 0.5 * projectile.gravity * travelTime * travelTime;
+      projectile.velocity.y -= projectile.gravity * travelTime;
+      const distance = step.length();
+      const dir = step.clone().normalize();
+      const wall = this.collision.raycast(origin, dir, distance, projectile.radius);
+      let hitDistance = wall?.distance ?? distance;
+      let target: TargetRegistry | null = null;
+      let hitPlayer = false;
+      if (projectile.fromPlayer) {
+        for (const candidate of this.targets.queryRay(origin, dir, hitDistance)) {
+          const hit = rayCylinder(origin, dir, candidate.position, candidate.radius + projectile.radius,
+            candidate.position.y - projectile.radius, candidate.position.y + candidate.height + projectile.radius, hitDistance);
+          if (hit && hit.distance < hitDistance) { hitDistance = hit.distance; target = candidate; }
         }
-
-        const dir = this.scratchDir.copy(projectile.velocity).normalize();
-        const wall = this.collision.raycast(projectile.mesh.position, dir, step.length() / slices + 0.05);
-        if (wall) {
-          this.effects.impactHit(wall.point, wall.normal);
-          if (!projectile.fromPlayer) onPlayerDamage(projectile.damage, wall.point);
-          consumed = true;
-          break;
-        }
-        projectile.mesh.position.copy(probe);
+      } else if (player?.alive) {
+        const hit = rayCylinder(origin, dir, player.position, player.radius + projectile.radius,
+          player.position.y - projectile.radius, player.position.y + player.height + projectile.radius, hitDistance);
+        if (hit && hit.distance < hitDistance) { hitDistance = hit.distance; hitPlayer = true; }
       }
-
-      const expired = projectile.life <= 0;
-      if (consumed || expired || next.y < -6) {
-        const center = projectile.mesh.position.clone();
-        if (projectile.explosive) {
-          this.explode(center, projectile.explosive.radius, projectile.explosive.damage, projectile.explosive.shieldBonus, true);
-        }
+      projectile.mesh.position.copy(origin).addScaledVector(dir, hitDistance);
+      const point = projectile.mesh.position.clone();
+      if (target && !projectile.explosive) {
+        target.applyDamage(projectile.damage, { headshot: false, critical: projectile.critical,
+          shieldBonus: projectile.shieldBonus, direction: dir, fromPlayer: true });
+        this.effects.fleshHit(point, projectile.critical);
+      }
+      if (hitPlayer) onPlayerDamage(projectile.damage, point);
+      if (wall && !target && !hitPlayer) this.effects.impactHit(point, wall.normal);
+      if (wall || target || hitPlayer || projectile.life <= 0 || point.y < -6) {
+        if (projectile.explosive) this.explode(point, projectile.explosive.radius,
+          projectile.explosive.damage, projectile.explosive.shieldBonus, projectile.fromPlayer);
         this.scene.remove(projectile.mesh);
         this.projectiles.splice(i, 1);
       }
@@ -268,6 +262,7 @@ export class CombatSystem {
     this.effects.explosion(center, radius);
     const hits = this.targets.querySphere(center, radius);
     for (const target of hits) {
+      if (!fromPlayer || !target.hostile || !this.collision.hasLineOfSight(center, target.centre)) continue;
       const distance = target.distanceTo(center);
       const falloff = 1 - Math.min(1, distance / Math.max(0.01, radius)) * 0.55;
       target.applyDamage(damage * falloff, {
@@ -326,6 +321,7 @@ interface Projectile {
   mesh: THREE.Mesh;
   velocity: THREE.Vector3;
   life: number;
+  gravity: number;
   damage: number;
   shieldBonus: number;
   fromPlayer: boolean;

@@ -33,7 +33,8 @@ export class PlayerController {
   inSafeZone = false;
 
   private fallStartY = 0;
-  private wasGrounded = true;
+  private jumpBuffer = 0;
+  private coyoteTime = 0;
   private bobPhase = 0;
   private bobIntensity = 0;
   private landSquash = 0;
@@ -58,6 +59,9 @@ export class PlayerController {
     this.pitch = 0;
     this.grounded = false;
     this.fallStartY = y;
+    this.jumpBuffer = 0;
+    this.coyoteTime = 0;
+    this.crouching = false;
     this.updateCamera(0);
   }
 
@@ -104,7 +108,11 @@ export class PlayerController {
   }
 
   get eyePosition(): THREE.Vector3 {
-    return new THREE.Vector3(this.position.x, this.position.y + PLAYER_EYE_HEIGHT - this.bobOffset(), this.position.z);
+    return new THREE.Vector3(this.position.x, this.position.y + this.eyeHeight() - this.bobOffset(), this.position.z);
+  }
+
+  private eyeHeight(): number {
+    return this.crouching ? PLAYER_HEIGHT * 0.62 - 0.15 : PLAYER_EYE_HEIGHT;
   }
 
   private bobOffset(): number {
@@ -129,7 +137,9 @@ export class PlayerController {
     const buffSpeed = this.player.buff.moveSpeed;
 
     this.sprinting = input.sprinting && input.forward > 0 && !input.aiming;
-    this.crouching = input.crouching;
+    this.crouching = input.crouching || (this.crouching && this.collision.overlaps(
+      this.position.x, this.position.y, this.position.z, PLAYER_RADIUS, PLAYER_HEIGHT,
+    ).length > 0);
 
     const targetSpeed = this.crouching
       ? stats.movementSpeed * 0.5
@@ -163,8 +173,12 @@ export class PlayerController {
       this.velocity.z = approach(this.velocity.z, 0, stop);
     }
 
-    // Jump.
-    if (input.jumping && this.grounded) {
+    this.jumpBuffer = input.wasPressed('Space') ? 0.12 : Math.max(0, this.jumpBuffer - dt);
+    this.coyoteTime = this.grounded ? 0.1 : Math.max(0, this.coyoteTime - dt);
+    // Buffered jump and a brief grace period after leaving a ledge.
+    if (this.jumpBuffer > 0 && this.coyoteTime > 0) {
+      this.jumpBuffer = 0;
+      this.coyoteTime = 0;
       this.velocity.y = JUMP_VELOCITY * (this.crouching ? 0.8 : 1);
       this.grounded = false;
       this.fallStartY = this.position.y;
@@ -184,8 +198,10 @@ export class PlayerController {
       0.62,
     );
 
-    const landed = !this.wasGrounded && result.grounded;
-    this.wasGrounded = this.grounded;
+    const landed = !this.grounded && result.grounded;
+    if (result.hitCeiling && this.velocity.y > 0) this.velocity.y = 0;
+    if (Math.abs(result.x - this.position.x - delta.x) > 0.001) this.velocity.x = 0;
+    if (Math.abs(result.z - this.position.z - delta.z) > 0.001) this.velocity.z = 0;
     this.position.set(result.x, result.y, result.z);
     this.grounded = result.grounded;
 
@@ -193,7 +209,7 @@ export class PlayerController {
       if (landed) {
         const fallDistance = Math.max(0, this.fallStartY - this.position.y);
         const impact = Math.min(1, fallDistance / 12);
-        this.velocity.set(0, 0, 0);
+        this.velocity.y = 0;
         if (impact > 0.12) {
           this.landSquash = impact;
           this.addShake(impact * 0.5);
@@ -232,7 +248,7 @@ export class PlayerController {
       (Math.random() - 0.5) * s * 0.2,
     );
 
-    const eyeY = PLAYER_EYE_HEIGHT - this.bobOffset() - (this.crouching ? 0.42 : 0);
+    const eyeY = this.eyeHeight() - this.bobOffset();
     this.camera.position.set(
       this.position.x + this.shake.x,
       this.position.y + eyeY + this.shake.y,

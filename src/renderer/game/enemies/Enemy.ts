@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { GRAVITY } from '../../../shared/constants';
+import { findPath } from '../physics/Navigation';
 import type { EnemyDefinition } from '../../../shared/types';
 import { audio, SoundName } from '../audio/AudioSystem';
 import { bus, GameEvents } from '../core/EventBus';
@@ -76,8 +78,11 @@ export class Enemy implements TargetRegistry {
   private burstTimer = 0;
   private areaTimer = 5;
   private summonTimer = 3;
-  private avoidTimer = 0;
-  private avoidDir = new THREE.Vector3();
+  private pathTimer = 0;
+  private path: { x: number; y: number; z: number }[] = [];
+  private lostSightTime = 0;
+  private verticalSpeed = 0;
+  private impulse = new THREE.Vector3();
   private lastDamageFrom: 'player' | 'other' = 'other';
 
   private rig: {
@@ -189,6 +194,7 @@ export class Enemy implements TargetRegistry {
   place(x: number, y: number, z: number): void {
     this.position.set(x, y, z);
     this.home.set(x, y, z);
+    this.lastKnownPlayer.set(x, y, z);
     this.group.position.set(x, y, z);
     this.patrolTarget.set(x, y, z);
   }
@@ -230,7 +236,7 @@ export class Enemy implements TargetRegistry {
     if (options.direction.lengthSq() > 0.01 && !this.isBoss) {
       // Small knockback for readability on light hits.
       const kb = Math.min(0.6, amount / 120);
-      this.position.addScaledVector(options.direction, kb * 0.3);
+      this.impulse.addScaledVector(options.direction, kb * (options.explosion ? 18 : 6));
     }
 
     if (this.definition.behavior === 'boss' && this.bossPhase === 1 && this.health <= this.maxHealth * 0.5) {
@@ -335,30 +341,30 @@ export class Enemy implements TargetRegistry {
     const flatDistance = Math.hypot(dx, dz);
     const detection = this.definition.detectionRadius * (this.lastDamageFrom === 'player' ? 1.6 : 1);
 
-    // --- transitions -----------------------------------------------------
-    if (this.state !== 'dead') {
-      if (!context.playerAlive) {
-        this.setState('idle');
-      } else if (flatDistance <= detection && (context.playerVisible || this.state === 'chase' || this.lastDamageFrom === 'player')) {
+    this.pathTimer -= dt;
+    if (!context.playerAlive) {
+      this.setState('idle');
+      this.burstRemaining = 0;
+    } else {
+      const seesPlayer = context.playerVisible && flatDistance <= detection;
+      if (seesPlayer) {
         this.lastKnownPlayer.copy(context.playerPosition);
-        if (this.state === 'idle' || this.state === 'patrol' || this.state === 'alert') {
+        this.lostSightTime = 0;
+        if (this.state === 'idle' || this.state === 'patrol') {
           this.becomeAlerted();
           audio.playAt(SoundName.EnemyAlert, flatDistance, 45, 400);
-          if (this.state === 'alert') {
-            this.stateTimer -= dt;
-            if (this.stateTimer <= 0) this.setState('chase');
-          }
         }
-      } else if (this.state === 'chase' || this.state === 'attack' || this.state === 'retreat') {
-        // Lost the player: search briefly, then calm down.
-        this.stateTimer += dt;
-        if (this.stateTimer > 6) {
-          this.lastDamageFrom = 'other';
-          this.setState('patrol');
-          this.pickPatrolTarget();
-        }
+      } else this.lostSightTime += dt;
+      if (this.state === 'alert') {
+        this.stateTimer -= dt;
+        if (this.stateTimer <= 0) this.setState('chase');
       }
-
+      if (['chase', 'attack', 'retreat'].includes(this.state) && this.lostSightTime >= 6) {
+        this.lastDamageFrom = 'other';
+        this.path.length = 0;
+        this.pickPatrolTarget();
+        this.setState('patrol', 5);
+      }
       if (this.state === 'idle' || this.state === 'patrol') {
         this.stateTimer -= dt;
         if (this.stateTimer <= 0) {
@@ -395,9 +401,18 @@ export class Enemy implements TargetRegistry {
     }
 
     // --- boss extras ------------------------------------------------------
-    if (this.isBoss && this.alive) {
+    if (this.isBoss && this.alive && context.playerAlive && ['chase', 'attack'].includes(this.state)) {
       this.tickBoss(context, effects);
     }
+
+    // Gravity and knockback also run when standing, attacking or alerted.
+    this.verticalSpeed = Math.max(-60, this.verticalSpeed - GRAVITY * dt);
+    const body = collision.moveCylinder(this.position, {
+      x: this.impulse.x * dt, y: (this.verticalSpeed + this.impulse.y) * dt, z: this.impulse.z * dt,
+    }, this.radius, this.height, 0);
+    this.position.set(body.x, body.y, body.z);
+    if (body.grounded || body.hitCeiling) { this.verticalSpeed = 0; this.impulse.y = 0; }
+    this.impulse.multiplyScalar(Math.exp(-8 * dt));
 
     // --- apply transform + animation --------------------------------------
     this.group.position.set(this.position.x, this.position.y, this.position.z);
@@ -410,7 +425,7 @@ export class Enemy implements TargetRegistry {
     const angle = rng.angle();
     const radius = rng.float(3, 12);
     this.patrolTarget.set(this.home.x + Math.cos(angle) * radius, this.home.y, this.home.z + Math.sin(angle) * radius);
-    this.setState('idle', rng.float(1.2, 3.4));
+
   }
 
   private standStill(dt: number): void {
@@ -440,39 +455,26 @@ export class Enemy implements TargetRegistry {
     dirX /= len;
     dirZ /= len;
 
-    this.avoidTimer -= dt;
-    if (this.avoidTimer <= 0) {
-      this.avoidTimer = 0.28;
-      const probeDistance = this.definition.radius + 2.4;
-      const origin = TEMP_ORIGIN.set(this.position.x, this.position.y + this.definition.height * 0.4, this.position.z);
-      const dir = TEMP_DIR.set(dirX, 0, dirZ);
-      const hit = collision.raycast(origin, dir, probeDistance);
-      if (hit) {
-        // Slide: use the wall normal to deflect movement.
-        const nx = hit.normal.x;
-        const nz = hit.normal.z;
-        const slideX = -nz;
-        const slideZ = nx;
-        const dot = slideX * dirX + slideZ * dirZ;
-        this.avoidDir.set(slideX * Math.sign(dot || 1), 0, slideZ * Math.sign(dot || 1));
-      } else {
-        this.avoidDir.set(0, 0, 0);
-      }
+    const direct = collision.moveCylinder(this.position,
+      { x: dirX * Math.min(len, 3), y: 0, z: dirZ * Math.min(len, 3) },
+      this.definition.radius, this.definition.height, 0.7);
+    if (direct.hitWall && this.pathTimer <= 0) {
+      this.pathTimer = 0.7 + rng.float(0, 0.3);
+      this.path = findPath(collision, this.position, destination, this.definition.radius, this.definition.height);
     }
-
-    let moveX = dirX;
-    let moveZ = dirZ;
-    if (this.avoidDir.lengthSq() > 0.01) {
-      moveX = dirX * 0.35 + this.avoidDir.x * 0.9;
-      moveZ = dirZ * 0.35 + this.avoidDir.z * 0.9;
-      const m = Math.hypot(moveX, moveZ) || 1;
-      moveX /= m;
-      moveZ /= m;
+    if (!direct.hitWall) this.path.length = 0;
+    while (this.path.length && Math.hypot(this.path[0]!.x - this.position.x, this.path[0]!.z - this.position.z) < 0.3) this.path.shift();
+    const waypoint = this.path[0];
+    if (waypoint) {
+      dirX = waypoint.x - this.position.x;
+      dirZ = waypoint.z - this.position.z;
+      const d = Math.hypot(dirX, dirZ) || 1;
+      dirX /= d; dirZ /= d;
     }
-
+    const travel = Math.min(speed * dt, waypoint ? Math.hypot(waypoint.x - this.position.x, waypoint.z - this.position.z) : len);
     const result = collision.moveCylinder(
       this.position,
-      { x: moveX * speed * dt, y: -12 * dt, z: moveZ * speed * dt },
+      { x: dirX * travel, y: 0, z: dirZ * travel },
       this.definition.radius,
       this.definition.height,
       0.7,
@@ -530,13 +532,9 @@ export class Enemy implements TargetRegistry {
       this.attackTimer = Math.max(this.attackTimer, 0.25);
       return;
     }
-    if (this.isBoss) {
-      this.moveTo(context.playerPosition, this.moveSpeed, dt, collision, context);
-      this.faceTowards(context.playerPosition.x, context.playerPosition.z, dt, 2.4);
-      if (distance <= this.definition.attackRange) this.setState('attack');
-      return;
-    }
-    this.holdDistance(context, dt, collision);
+    const destination = context.playerVisible ? context.playerPosition : this.lastKnownPlayer;
+    this.moveTo(destination, this.moveSpeed, dt, collision, context);
+    this.faceTowards(destination.x, destination.z, dt, this.isBoss ? 2.4 : 6);
   }
 
   private attack(context: EnemyTickContext, dt: number, collision: CollisionWorld): void {
@@ -544,7 +542,8 @@ export class Enemy implements TargetRegistry {
     this.faceTowards(context.playerPosition.x, context.playerPosition.z, dt, 8);
 
     if (this.stateTimer > 0) this.stateTimer -= dt;
-    if (this.stateTimer <= 0 && !context.playerVisible) {
+    if (!context.playerAlive || !context.playerVisible) {
+      this.burstRemaining = 0;
       this.setState('chase');
       return;
     }
@@ -724,7 +723,6 @@ export class Enemy implements TargetRegistry {
 }
 
 const TEMP_CENTRE = new THREE.Vector3();
-const TEMP_ORIGIN = new THREE.Vector3();
 const TEMP_DIR = new THREE.Vector3();
 const TEMP_DEST = new THREE.Vector3();
 const TEMP_MUZZLE = new THREE.Vector3();

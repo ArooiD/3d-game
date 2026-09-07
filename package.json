@@ -15,7 +15,8 @@
     "preview": "npm run build && electron .",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build && electron-builder",
-    "dist:dir": "npm run build && electron-builder --dir"
+    "dist:dir": "npm run build && electron-builder --dir",
+    "test": "node scripts/test-gameplay.mjs"
   },
   "license": "MIT",
   "devDependencies": {

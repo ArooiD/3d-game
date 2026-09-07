@@ -1,6 +1,7 @@
 import * as THREE from 'three';
+import { FixedStep } from '../game/core/FixedStep';
 import type { CharacterId, SettingsState, Weapon } from '../../shared/types';
-import { INVENTORY_SLOTS, STARTING_RESERVE_MULTIPLIER } from '../../shared/constants';
+import { PLAYER_HEIGHT, PLAYER_RADIUS, INVENTORY_SLOTS, STARTING_RESERVE_MULTIPLIER } from '../../shared/constants';
 import { ACTIVE_SKILLS, CHARACTERS, FRAG } from '../data/characters/characters';
 import { PROTOTYPE_WEAPON_NAME } from '../data/quests/quests';
 import { audio } from '../game/audio/AudioSystem';
@@ -202,16 +203,24 @@ export class GameApp {
     this.handle = requestAnimationFrame(tick);
   }
 
+  private simulation = new FixedStep();
+
   private frame(): void {
     // Clamp dt so an alt-tab or a slow frame cannot tunnel the player through
     // geometry or make enemies skip their whole attack tick.
-    const dt = Math.min(0.05, this.clock.getDelta());
-    this.elapsed += dt;
+    const dt = Math.min(0.25, this.clock.getDelta());
 
     if (states.isPlaying()) {
-      this.playtime += dt;
-      this.simulate(dt);
+      this.simulation.advance(dt, (step) => {
+        if (!states.isPlaying()) return;
+        this.elapsed += step;
+        this.playtime += step;
+        this.simulate(step);
+        input.endFrame();
+      });
     } else {
+      this.simulation.reset();
+      input.endFrame();
       // Menus still need the world to animate (and the camera to hold still).
       this.world.update(dt);
       this.effects.update(dt);
@@ -219,7 +228,6 @@ export class GameApp {
 
     this.renderer.render(this.scene, this.camera);
     if (this.debug.isOpen) this.reportDebug();
-    input.endFrame();
   }
 
   // -------------------------------------------------------------- simulate
@@ -249,8 +257,8 @@ export class GameApp {
     };
 
     this.weapons.update(dt, fireContext, {
-      fireHeld: input.firing,
-      firePressed: input.firePressed,
+      fireHeld: input.firing && !frozen,
+      firePressed: input.firePressed && !frozen,
       aiming: input.aiming && !frozen,
     });
     this.hud.setAiming(this.weapons.isAiming);
@@ -269,13 +277,25 @@ export class GameApp {
           life: 5,
         });
       },
-      explode: (point, radius, damage) => this.combat.explode(point, radius, damage, 0, false),
+      explode: (point, radius, damage) => {
+        this.effects.explosion(point, radius);
+        const chest = this.controller.position.clone().add(new THREE.Vector3(0, 1, 0));
+        const distance = chest.distanceTo(point);
+        if (distance < radius && this.collision.hasLineOfSight(point, chest)) {
+          this.damagePlayer(damage * (1 - 0.55 * distance / radius), point);
+          const push = chest.sub(point).normalize().multiplyScalar(8 * (1 - distance / radius));
+          this.controller.addImpulse(push.x, Math.max(2, push.y), push.z);
+        }
+      },
       groundY: (x, z) => this.groundY(x, z),
       playerPosition: this.controller.position,
       playerAlive: !this.player.dead,
     }, this.elapsed);
 
-    this.combat.update(dt, (amount, point) => this.damagePlayer(amount, point));
+    this.combat.update(dt, (amount, point) => this.damagePlayer(amount, point), {
+      position: this.controller.position, height: this.controller.crouching ? PLAYER_HEIGHT * 0.62 : PLAYER_HEIGHT, radius: PLAYER_RADIUS, alive: !frozen,
+    });
+    this.effects.update(dt);
     this.updateDrone(dt);
     this.updateAbilities(dt);
 

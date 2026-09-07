@@ -9,7 +9,7 @@ import * as THREE from 'three';
  *  - a uniform spatial hash keeps query cost flat across the 300x300 map
  *
  * A physics engine (cannon-es / rapier) would work too, but AABBs + a hash grid
- * give deterministic results, zero allocation per query and ~one tenth the code.
+ * keep static collision queries local without an additional runtime dependency.
  */
 
 export interface ColliderBox {
@@ -128,7 +128,7 @@ export class CollisionWorld {
   surfaceHeight(x: number, z: number, maxY = 40): number {
     let best = this.groundHeight(x, z);
     for (const box of this.queryArea(x, z, 0.001)) {
-      if (!box.solid) continue;
+      if (!box.solid || x < box.minX || x > box.maxX || z < box.minZ || z > box.maxZ) continue;
       if (box.topY <= maxY + EPSILON && box.topY > best) best = box.topY;
     }
     return best;
@@ -179,76 +179,58 @@ export class CollisionWorld {
     radius: number,
     height: number,
     maxStep: number,
-  ): { x: number; y: number; z: number; hitWall: boolean; grounded: boolean } {
-    let hitWall = false;
-
-    // --- X axis ---
-    let nx = pos.x + delta.x;
-    if (delta.x !== 0) {
-      const feet = this.standingY(pos.x, pos.y, pos.z, radius, height);
-      const hits = this.overlaps(nx, feet + EPSILON, pos.z, radius, height);
-      if (hits.length > 0) {
-        hitWall = true;
-        nx = delta.x > 0 ? Math.min(...hits.map((b) => b.minX)) - radius : Math.max(...hits.map((b) => b.maxX)) + radius;
+  ): { x: number; y: number; z: number; hitWall: boolean; grounded: boolean; hitCeiling: boolean } {
+    const result = { x: pos.x, y: pos.y, z: pos.z, hitWall: false, grounded: false, hitCeiling: false };
+    // Bounded displacement prevents tunnelling even for impulses and low FPS.
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z)) / Math.max(0.05, radius * 0.5)));
+    const dx = delta.x / steps, dy = delta.y / steps, dz = delta.z / steps;
+    for (let i = 0; i < steps; i++) {
+      const supported = result.y <= this.surfaceHeight(result.x, result.z, result.y + EPSILON) + EPSILON;
+      for (const axis of ['x', 'z'] as const) {
+        const amount = axis === 'x' ? dx : dz;
+        if (amount === 0) continue;
+        const next = { ...result, [axis]: result[axis] + amount };
+        const hits = this.overlaps(next.x, result.y, next.z, radius, height);
+        if (hits.length) {
+          const top = Math.max(...hits.map(box => box.topY));
+          // A step needs support and enough headroom throughout the rise.
+          const rise = top - result.y;
+          if (supported && dy <= 0 && rise > 0 && rise <= maxStep &&
+              !this.overlaps(result.x, top, result.z, radius, height).length &&
+              !this.overlaps(next.x, top, next.z, radius, height).length) {
+            result.y = top;
+            result[axis] = next[axis];
+          } else {
+            result.hitWall = true;
+            const boundary = amount > 0
+              ? Math.min(...hits.map(box => axis === 'x' ? box.minX : box.minZ)) - radius
+              : Math.max(...hits.map(box => axis === 'x' ? box.maxX : box.maxZ)) + radius;
+            result[axis] = amount > 0 ? Math.max(result[axis], Math.min(next[axis], boundary))
+              : Math.min(result[axis], Math.max(next[axis], boundary));
+          }
+        } else result[axis] = next[axis];
       }
+      let ny = result.y + dy;
+      if (dy > 0 && !result.hitCeiling) {
+        for (const box of this.queryArea(result.x, result.z, radius)) {
+          if (!box.solid || result.x + radius <= box.minX || result.x - radius >= box.maxX ||
+              result.z + radius <= box.minZ || result.z - radius >= box.maxZ) continue;
+          if (result.y + height <= box.minY + EPSILON && ny + height >= box.minY) {
+            ny = Math.min(ny, box.minY - height);
+            result.hitCeiling = true;
+          }
+        }
+      } else if (result.hitCeiling) ny = result.y;
+      const surface = this.surfaceHeight(result.x, result.z, result.y + EPSILON);
+      result.grounded = dy <= 0 && ny <= surface + EPSILON;
+      result.y = result.grounded ? surface : ny;
     }
-
-    // --- Z axis ---
-    let nz = pos.z + delta.z;
-    if (delta.z !== 0) {
-      const feet = this.standingY(nx, pos.y, pos.z, radius, height);
-      const hits = this.overlaps(nx, feet + EPSILON, nz, radius, height);
-      if (hits.length > 0) {
-        hitWall = true;
-        nz = delta.z > 0 ? Math.min(...hits.map((b) => b.minZ)) - radius : Math.max(...hits.map((b) => b.maxZ)) + radius;
-      }
-    }
-
-    // --- Vertical: snap to the walkable surface ---
-    const surface = this.surfaceHeight(nx, nz, pos.y + maxStep);
-    let ny = pos.y + delta.y;
-    let grounded = false;
-    if (ny <= surface + EPSILON) {
-      ny = surface;
-      grounded = true;
-    } else if (
-      delta.y > 0 &&
-      this.overlaps(nx, pos.y, nz, radius, height).length > 0
-    ) {
-      // Head bump.
-      const hits = this.overlaps(nx, pos.y, nz, radius, height);
-      const ceiling = Math.min(...hits.map((b) => b.minY));
-      ny = Math.max(pos.y, ceiling - height);
-    }
-
-    // Never allow the body to end inside a solid box.
-    const stuck = this.overlaps(nx, ny + EPSILON, nz, radius, height);
-    if (stuck.length > 0) {
-      const top = Math.max(...stuck.map((b) => b.topY));
-      if (top - ny <= maxStep + 0.35) {
-        ny = top;
-        grounded = true;
-      } else {
-        // Push back out along the smaller penetration axis.
-        const box = stuck[0] as ColliderBox;
-        const pushLeft = Math.abs(nx - (box.minX - radius));
-        const pushRight = Math.abs(nx - (box.maxX + radius));
-        const pushBack = Math.abs(nz - (box.minZ - radius));
-        const pushFwd = Math.abs(nz - (box.maxZ + radius));
-        const minPush = Math.min(pushLeft, pushRight, pushBack, pushFwd);
-        if (minPush === pushLeft) nx = box.minX - radius;
-        else if (minPush === pushRight) nx = box.maxX + radius;
-        else if (minPush === pushBack) nz = box.minZ - radius;
-        else nz = box.maxZ + radius;
-      }
-    }
-
-    return { x: nx, y: ny, z: nz, hitWall, grounded };
+    return result;
   }
 
-  /** Highest surface the cylinder would stand on at this spot. */
-  standingY(x: number, _y: number, z: number, _radius: number, _height: number): number {
-    return this.surfaceHeight(x, z, 60);
+  /** Surface reachable from the current feet, never a roof overhead. */
+  standingY(x: number, y: number, z: number, _radius: number, _height: number): number {
+    return this.surfaceHeight(x, z, y + EPSILON);
   }
 
   /** Ray vs boxes (slab method). Used by hitscan weapons and line of sight. */
@@ -256,6 +238,7 @@ export class CollisionWorld {
     origin: { x: number; y: number; z: number },
     dir: { x: number; y: number; z: number },
     maxDistance: number,
+    radius = 0,
   ): { distance: number; point: THREE.Vector3; normal: THREE.Vector3; box: ColliderBox } | null {
     let bestT = maxDistance;
     let best: ColliderBox | null = null;
@@ -283,8 +266,8 @@ export class CollisionWorld {
           if (!cell) continue;
           for (const box of cell.boxes) {
             if (!box.solid) continue;
-            const hit = rayBoxT(origin, invX, invY, invZ, box);
-            if (hit && hit.t < bestT) {
+            const hit = rayBoxT(origin, invX, invY, invZ, radius > 0 ? { ...box, minX: box.minX - radius, maxX: box.maxX + radius, minY: box.minY - radius, maxY: box.maxY + radius, minZ: box.minZ - radius, maxZ: box.maxZ + radius } : box);
+            if (hit && hit.t <= bestT) {
               bestT = hit.t;
               best = box;
               bestAxis = hit.axis;
@@ -295,11 +278,11 @@ export class CollisionWorld {
       }
     }
 
-    if (!best) {
+    {
       // Ground plane fallback keeps shots from flying to infinity.
       if (dir.y < -1e-6) {
-        const t = (this.groundY - origin.y) / dir.y;
-        if (t > 0 && t <= maxDistance) {
+        const t = (this.groundY + radius - origin.y) / dir.y;
+        if (t >= 0 && t <= bestT) {
           const point = new THREE.Vector3(origin.x + dir.x * t, this.groundY, origin.z + dir.z * t);
           return {
             distance: t,
@@ -312,8 +295,8 @@ export class CollisionWorld {
           };
         }
       }
-      return null;
     }
+    if (!best) return null;
 
     const point = new THREE.Vector3(origin.x + dir.x * bestT, origin.y + dir.y * bestT, origin.z + dir.z * bestT);
     const normal = new THREE.Vector3(
@@ -380,6 +363,6 @@ function rayBoxT(
     }
   }
 
-  if (tMax < Math.max(tMin, 0) || tMin < 0) return null;
-  return { t: tMin, axis, sign };
+  if (tMax < Math.max(tMin, 0)) return null;
+  return { t: Math.max(0, tMin), axis, sign };
 }
