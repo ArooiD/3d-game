@@ -35,6 +35,8 @@ export interface EnemyEvents {
   playerAlive: boolean;
 }
 
+const ENGAGED = new Set(['alert', 'chase', 'attack', 'retreat']);
+
 export class EnemyManager {
   readonly enemies: Enemy[] = [];
   readonly targets = new TargetGrid();
@@ -247,7 +249,12 @@ export class EnemyManager {
   private updateHealthBars(): void {
     const entries: { object: THREE.Object3D; offsetY: number }[] = [];
     const sorted = this.enemies
-      .filter((enemy) => enemy.alive && (enemy.health < enemy.maxHealth || enemy.shield < enemy.maxShield))
+      // Show the bar once a foe is engaged, not only after the first hit: a bar
+      // that pops in mid-fight is easier to read than one that is missing while
+      // you are deciding which target to shoot.
+      .filter((enemy) => enemy.alive
+        && (enemy.health < enemy.maxHealth || enemy.shield < enemy.maxShield
+          || ENGAGED.has(enemy.state) || enemy.isBoss))
       .sort((a, b) => a.distanceTo(this.cameraPos()) - b.distanceTo(this.cameraPos()));
     for (const enemy of sorted.slice(0, 20)) {
       entries.push({ object: enemy.group, offsetY: enemy.definition.height + 0.6 });

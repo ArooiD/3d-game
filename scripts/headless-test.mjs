@@ -592,6 +592,50 @@ async function run() {
     check('combat: killing an enemy awards XP', Number(killOutcome.xp) > Number(xpBefore),
       `xp ${xpBefore} -> ${killOutcome.xp}, dead=${killOutcome.dead}`);
 
+    // ---- overhead health bars ----------------------------------------------
+    // The bar pool, its per-frame projection and the DOM nodes already exist; what
+    // made the bars invisible was a missing stylesheet rule (they had no size). So
+    // this check damages an enemy in view and asserts a bar became a real, sized,
+    // on-screen element rather than just existing in the DOM.
+    const barReport = await client.evaluate(`
+      const g = window.__game;
+      const Vec = window.__gameDebug.THREE.Vector3;
+      const spawnAt = g.controller.position.clone()
+        .add(g.controller.forwardVector(new Vec()).multiplyScalar(6));
+      g.enemies.spawnRandomAt(spawnAt, g.player.level);
+      const enemy = g.enemies.enemies[g.enemies.enemies.length - 1];
+      if (enemy) enemy.applyDamage(enemy.maxHealth * 0.5, {
+        headshot: false, critical: false, shieldBonus: 0,
+        fromPlayer: true, direction: new Vec(0, 1, 0),
+      });
+      return { spawned: enemy ? 1 : 0 };
+    `, cap(8000));
+    const bars = await client.waitFor('an enemy health bar to be shown on screen', `
+      const shown = Array.from(document.querySelectorAll('#world-overlay .hpbar'))
+        .filter((el) => !el.classList.contains('hidden'));
+      if (shown.length === 0) return null;
+      const el = shown[0];
+      const rect = el.getBoundingClientRect();
+      const fill = el.querySelector('.hpbar-fill');
+      const style = getComputedStyle(el);
+      const m = /translate\\((-?[\\d.]+)px,\\s*(-?[\\d.]+)px\\)/.exec(el.style.transform || '');
+      return {
+        shown: shown.length,
+        w: rect.width,
+        h: rect.height,
+        visible: style.display !== 'none' && rect.height > 0 && rect.width > 0,
+        onScreen: Boolean(m) && Number(m[1]) >= 0 && Number(m[1]) <= window.innerWidth
+          && Number(m[2]) >= 0 && Number(m[2]) <= window.innerHeight,
+        fillWidth: fill ? fill.getBoundingClientRect().width : 0,
+      };
+    `, cap(6000));
+    check('enemies: hurt enemies get a sized overhead health bar projected on screen',
+      Boolean(barReport) && barReport.spawned === 1 && Boolean(bars)
+      && bars.visible === true && bars.onScreen === true
+      && bars.fillWidth > 0 && bars.fillWidth < bars.w,
+      JSON.stringify({ barReport, bars }));
+    await client.evaluate('window.__game.enemies.clear(); return true;');
+
     // ---- performance: measure the cost of the animated rigs ----------------
     // The stress mob is torn down immediately after measuring: with navigation
     // live it would otherwise walk into the player and kill them mid-suite.

@@ -1264,6 +1264,43 @@ input[type='range']::-webkit-slider-thumb {
   letter-spacing: 1px;
 }
 
+/* enemy health bars (HealthBarPool projects these into #world-overlay) */
+.hpbar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 56px;
+  height: 6px;
+  margin-top: -8px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  will-change: transform;
+}
+
+.hpbar-fill,
+.hpbar-shield {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 100%;
+  border-radius: 1px;
+}
+
+/* Shield rides above health, so the bar reads shield-then-health left to right. */
+.hpbar-shield {
+  background: linear-gradient(90deg, #2c7fd6, var(--shield));
+  z-index: 2;
+}
+
+.hpbar-fill {
+  background: linear-gradient(90deg, #c02f2f, var(--health));
+  z-index: 1;
+}
+
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); }
 ::-webkit-scrollbar-thumb { background: rgba(160, 190, 220, 0.24); }
