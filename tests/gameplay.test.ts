@@ -10,6 +10,8 @@ import { Enemy } from '../src/renderer/game/enemies/Enemy';
 import { EnemyFactory } from '../src/renderer/game/enemies/EnemyModels';
 import { WorldBuilder } from '../src/renderer/game/world/WorldMeshes';
 import { buildCharacterModel } from '../src/renderer/game/player/CharacterModels';
+import { buildGunModel, fitGunLength } from '../src/renderer/game/weapons/WeaponModels';
+import { generateWeapon } from '../src/renderer/game/weapons/WeaponGenerator';
 import type { BoneName } from '../src/renderer/game/anim/Rig';
 import { PLAYER_HEIGHT } from '../src/shared/constants';
 import type { CharacterId } from '../src/shared/types';
@@ -165,5 +167,40 @@ test('operator bodies are independent instances and release their meshes', () =>
   // The other instance must survive its sibling being torn down.
   assert.ok(b.meshes.length > 10);
   b.dispose();
+});
+
+// The viewmodel used to place both hands with the same roll and yaw, offset only
+// along the barrel, which collapsed them into one flat cutout when seen from the
+// eye. Real hands converge on the weapon: apart in X and Y, each forearm yawed
+// toward its own shoulder. This test pins that shape for every weapon archetype.
+test('viewmodel hands are not coplanar: separated in X/Y and yawed apart', () => {
+  const types = ['pistol', 'assault_rifle', 'shotgun', 'sniper_rifle', 'smg'] as const;
+  for (const type of types) {
+    const weapon = generateWeapon({ type, level: 5, rarity: 'rare', luck: 1 });
+    const model = buildGunModel(weapon, { detail: 'high', hands: true });
+    fitGunLength(model, type === 'sniper_rifle' ? 0.86 : 0.62);
+    const hands: THREE.Group[] = [];
+    model.group.children.forEach((child) => {
+      if (child instanceof THREE.Group && child.children.length >= 6) hands.push(child);
+    });
+    assert.equal(hands.length, 2, `${type} should have exactly two hands`);
+    const [right, left] = hands;
+    const gap = right.position.clone().sub(left.position);
+    // The barrel runs along -Z, so the old bug - both hands offset only
+    // front-to-back - shows up as a gap with no perpendicular spread. Real hands
+    // are apart sideways/vertically as well as along the gun, so the component of
+    // their separation perpendicular to the barrel must be non-trivial.
+    const perpendicular = Math.hypot(gap.x, gap.y);
+    assert.ok(perpendicular > 0.05,
+      `${type} hands differ perpendicular to the barrel by only ${perpendicular.toFixed(3)} (flat)`);
+    assert.ok(Math.abs(gap.z) > 0.05, `${type} hands are not offset along the barrel`);
+    // Opposite yaw, so the forearms form a V rather than two parallel planks.
+    assert.ok(Math.sign(right.rotation.y) !== Math.sign(left.rotation.y),
+      `${type} forearms yaw the same way (${right.rotation.y}/${left.rotation.y})`);
+    // And opposite roll, so the knuckles do not lie in one vertical plane.
+    assert.ok(Math.sign(right.rotation.z) !== Math.sign(left.rotation.z),
+      `${type} hands share a roll plane (${right.rotation.z}/${left.rotation.z})`);
+    model.dispose();
+  }
 });
 

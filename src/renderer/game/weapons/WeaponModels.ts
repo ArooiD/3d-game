@@ -425,11 +425,15 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
     const sleeve = new THREE.MeshLambertMaterial({ color: plate, flatShading: true });
     owned.push(glove, sleeve);
 
-    // A forearm plate runs back off-screen from each glove so the viewmodel
-    // reads as the operator's own arms instead of a pair of floating hands.
-    const gauntlet = (hand: THREE.Group, side: number): void => {
-      place(hand, boxGeo, sleeve, 0.062, 0.05, 0.045, 0.004 * side, -0.048, 0.05).rotation.x = 0.5;
-      place(hand, boxGeo, glove, 0.074, 0.072, 0.22, 0.006 * side, -0.108, 0.15).rotation.x = 0.62;
+    /**
+     * Forearm running back off-screen from a glove. `side` is only used to bias
+     * the trim: the arms themselves are placed apart in X and Y and yawed toward
+     * the weapon, which is what stops the pair reading as one flat cutout.
+     */
+    const gauntlet = (hand: THREE.Group, side: number, length: number): void => {
+      place(hand, boxGeo, sleeve, 0.062, 0.05, 0.045, 0.004 * side, -0.05, 0.055).rotation.x = 0.5;
+      place(hand, boxGeo, glove, 0.076, 0.074, length, 0, -0.056 - length * 0.46, 0.02 + length * 0.44)
+        .rotation.x = Math.atan2(0.62, 1);
       if (options.armorAccent !== undefined) {
         const lamp = new THREE.MeshLambertMaterial({
           color: options.armorAccent,
@@ -438,38 +442,57 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
           flatShading: true,
         });
         owned.push(lamp);
-        place(hand, boxGeo, lamp, 0.02, 0.016, 0.1, 0.043 * side, -0.104, 0.16).rotation.x = 0.62;
+        place(hand, boxGeo, lamp, 0.02, 0.016, length * 0.46, 0.041 * side, -0.052 - length * 0.44, 0.03 + length * 0.45)
+          .rotation.x = Math.atan2(0.62, 1);
       }
     };
 
-    // Firing hand wraps the grip.
-    const rightHand = new THREE.Group();
-    rightHand.position.set(0.012, layout.receiverY - layout.receiver[1] * 0.5 - layout.gripLength * 0.5, gripZ + 0.012);
-    rightHand.rotation.set(0.1, 0, -0.15);
-    group.add(rightHand);
-    place(rightHand, boxGeo, glove, 0.055, 0.07, 0.075, 0, 0, 0);
-    for (let i = 0; i < 4; i++) {
-      place(rightHand, boxGeo, glove, 0.014, 0.05, 0.016, -0.03 + i * 0.016, 0.006, -0.038);
-    }
-    place(rightHand, boxGeo, glove, 0.05, 0.055, 0.05, 0.006, -0.05, 0.03).rotation.x = 0.5;
-    gauntlet(rightHand, 1);
+    /**
+     * Both hands sit where a shooter actually holds a weapon: the firing hand on
+     * the grip to the right and high, the support hand forward, left and low.
+     * Each forearm then yaws back toward its own shoulder, so on screen the arms
+     * form a V into the weapon. Offsetting both hands only along the barrel axis
+     * collapsed them into one flat silhouette.
+     */
+    const hand = (
+      grip: THREE.Vector3,
+      side: number,
+      opts: { length: number; roll: number; yaw: number },
+    ): THREE.Group => {
+      const node = new THREE.Group();
+      node.position.copy(grip);
+      node.rotation.set(0.12, opts.yaw, opts.roll);
+      group.add(node);
+      // Palm, wrapped around whatever it is holding.
+      place(node, boxGeo, glove, 0.055, 0.068, 0.072, 0, 0, 0);
+      // Four fingers curling over the front face of the grip.
+      for (let i = 0; i < 4; i++) {
+        place(node, boxGeo, glove, 0.013, 0.048, 0.017, -0.029 + i * 0.017, 0.005, -0.04).rotation.x = -0.35;
+      }
+      // Thumb on the near flank, knuckle toward the camera.
+      place(node, boxGeo, glove, 0.017, 0.02, 0.05, 0.031 * side, 0.02, -0.014).rotation.x = -0.5;
+      gauntlet(node, side, opts.length);
+      return node;
+    };
 
-    // Support hand: on the foregrip, pump or mag as the archetype dictates.
-    const leftHand = new THREE.Group();
+    const gripTopY = layout.receiverY - layout.receiver[1] * 0.5 - layout.gripLength * 0.42;
+
+    // Firing hand: on the grip, rolled in so the knuckles read against the light.
+    hand(new THREE.Vector3(0.026, gripTopY - 0.01, gripZ + 0.022), 1, { length: 0.3, roll: -0.3, yaw: 0.34 });
+
+    // Support hand: forward and under the barrel, reaching in from the left.
+    const support = new THREE.Vector3();
     if (layout.pump && slide) {
-      leftHand.position.copy(slide.position).add(new THREE.Vector3(-0.01, 0.005, 0.02));
+      support.copy(slide.position).add(new THREE.Vector3(-0.03, -0.012, 0.005));
     } else if (layout.foregrip) {
-      leftHand.position.set(-0.012, layout.receiverY - layout.receiver[1] * 0.5 - 0.03, layout.receiverZ - layout.receiver[2] * 0.42 + 0.02);
+      support.set(-0.034, layout.receiverY - layout.receiver[1] * 0.5 - 0.062,
+        layout.receiverZ - layout.receiver[2] * 0.42 + 0.03);
     } else {
-      leftHand.position.set(-0.014, layout.receiverY - layout.receiver[1] * 0.5 - 0.02, layout.receiverZ + layout.magazineZ - 0.05);
+      // Cupping the grip from beneath, the way a two-handed grip actually works.
+      support.set(-0.03, layout.receiverY - layout.receiver[1] * 0.5 - 0.055,
+        layout.receiverZ + layout.magazineZ - 0.03);
     }
-    leftHand.rotation.set(0.1, 0, 0.2);
-    group.add(leftHand);
-    place(leftHand, boxGeo, glove, 0.052, 0.062, 0.07, 0, 0, 0);
-    for (let i = 0; i < 4; i++) {
-      place(leftHand, boxGeo, glove, 0.013, 0.046, 0.015, 0.026 - i * 0.016, 0.004, -0.034);
-    }
-    gauntlet(leftHand, -1);
+    hand(support, -1, { length: 0.27, roll: 0.36, yaw: -0.5 });
   }
 
   const muzzle = new THREE.Object3D();

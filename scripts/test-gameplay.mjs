@@ -5,8 +5,15 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 const dir = await mkdtemp(join(tmpdir(), 'dustfall-tests-'));
 try {
-  const outfile = join(dir, 'gameplay.test.cjs');
-  await build({ entryPoints: ['tests/gameplay.test.ts'], bundle: true, platform: 'node', format: 'cjs', outfile });
-  const result = spawnSync(process.execPath, ['--test', outfile], { stdio: 'inherit' });
+  await build({
+    entryPoints: ['tests/gameplay.test.ts', 'tests/physics.test.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outdir: dir,
+    outExtension: { '.js': '.cjs' },
+  });
+  const suites = ['gameplay.test.cjs', 'physics.test.cjs'].map((name) => join(dir, name));
+  const result = spawnSync(process.execPath, ['--test', ...suites], { stdio: 'inherit' });
   process.exitCode = result.status ?? 1;
 } finally { await rm(dir, { recursive: true, force: true }); }

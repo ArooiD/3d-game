@@ -36,8 +36,14 @@ export interface WeaponHudState {
   slot: number;
 }
 
-const VIEWMODEL_OFFSET = new THREE.Vector3(0.26, -0.24, -0.52);
-const AIM_OFFSET = new THREE.Vector3(0, -0.115, -0.34);
+/**
+ * Rest and aim poses relative to the view camera. The weapon is held close -
+ * a third of a meter from the eye - and the view camera's narrow FOV makes it
+ * read large without the wide-angle distortion the world camera (up to 90 deg)
+ * would otherwise apply to something that near.
+ */
+const VIEWMODEL_OFFSET = new THREE.Vector3(0.19, -0.17, -0.38);
+const AIM_OFFSET = new THREE.Vector3(0, -0.08, -0.26);
 
 export class WeaponController {
   readonly slots: (Weapon | null)[] = [null, null, null];
@@ -59,6 +65,16 @@ export class WeaponController {
   private burstPause = 0;
 
   private viewModel = new THREE.Group();
+  /**
+   * The weapon renders through its own camera into its own minimal scene. Sharing
+   * the world camera made every gun look small and far: at 78+ degrees of FOV an
+   * object 0.5 m from the eye covers a fraction of the screen, and real shooter
+   * viewmodels are always drawn with a narrower projection. The scene is a handful
+   * of lights plus the gun, so the extra pass costs one draw batch and no shadows.
+   */
+  readonly viewScene = new THREE.Scene();
+  readonly viewCamera = new THREE.PerspectiveCamera(55, 16 / 9, 0.01, 6);
+  private viewLights: THREE.Light[] = [];
   private gun: GunModel | null = null;
   private lastMuzzleWorld = new THREE.Vector3();
   private muzzleGlow = 0;
@@ -79,7 +95,20 @@ export class WeaponController {
     private controller: PlayerController,
   ) {
     this.viewModel.name = 'viewmodel';
-    this.camera.add(this.viewModel);
+    this.viewScene.name = 'view-scene';
+    this.viewCamera.name = 'view-camera';
+    this.viewScene.add(this.viewCamera);
+    this.viewCamera.add(this.viewModel);
+
+    // Lighting tuned for the gun alone: the world's sun is deliberately not
+    // reused, so the weapon stays legible in caves, at night and in smoke.
+    const key = new THREE.DirectionalLight(0xffe6c0, 1.35);
+    key.position.set(-0.6, 1.1, 0.7);
+    const fill = new THREE.DirectionalLight(0x8fa6c8, 0.55);
+    fill.position.set(0.9, -0.2, 0.3);
+    const ambient = new THREE.HemisphereLight(0xffd9a0, 0x40372c, 0.85);
+    this.viewLights = [key, fill, ambient];
+    this.viewScene.add(key, fill, ambient);
     if (!camera.parent) _scene.add(camera);
   }
 
@@ -318,6 +347,14 @@ export class WeaponController {
   }
 
   private updateViewmodel(dt: number): void {
+    // The view camera mirrors the eye every frame, so the weapon inherits look
+    // direction, recoil and screen shake exactly like a parented viewmodel would.
+    this.camera.updateWorldMatrix(true, false);
+    this.viewCamera.position.setFromMatrixPosition(this.camera.matrixWorld);
+    this.viewCamera.quaternion.setFromRotationMatrix(this.camera.matrixWorld);
+    this.viewCamera.aspect = this.camera.aspect;
+    this.viewCamera.updateProjectionMatrix();
+
     const weapon = this.current;
     if (!weapon) {
       this.viewModel.visible = false;
@@ -328,8 +365,8 @@ export class WeaponController {
     const speed = Math.hypot(this.controller.velocity.x, this.controller.velocity.z);
     const moveAmount = Math.min(1, speed / Math.max(1, this.player.stats.sprintSpeed));
     this.bobPhase += dt * (7 + moveAmount * 6);
-    const bobX = Math.cos(this.bobPhase) * 0.012 * moveAmount;
-    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.014 * moveAmount;
+    const bobX = Math.cos(this.bobPhase) * 0.008 * moveAmount;
+    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.009 * moveAmount;
 
     const target = this.isAiming ? AIM_OFFSET : VIEWMODEL_OFFSET;
     const base = this.viewModel.position;
@@ -359,7 +396,6 @@ export class WeaponController {
     const gun = this.gun;
     if (gun) {
       gun.muzzle.getWorldPosition(this.lastMuzzleWorld);
-      this.lastMuzzleWorld.addScaledVector(TEMP_FWD.set(0, 0, -1).applyQuaternion(this.camera.quaternion), 0.28);
       this.animateInternals(dt);
     } else {
       this.camera.getWorldPosition(this.lastMuzzleWorld);
@@ -475,12 +511,29 @@ export class WeaponController {
     return this.isAiming ? 1 : 0;
   }
 
+  /**
+   * Draws the weapon over the world. Called by the app after the main pass; the
+   * depth buffer is kept so the gun always wins against the terrain in front of
+   * it (nothing in hand should ever be occluded by a wall it is touching).
+   */
+  renderViewmodel(renderer: THREE.WebGLRenderer): void {
+    if (!this.gun || !this.viewModel.visible) return;
+    const autoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clearDepth();
+    renderer.render(this.viewScene, this.viewCamera);
+    renderer.autoClear = autoClear;
+  }
+
   dispose(): void {
     this.viewModel.removeFromParent();
+    for (const light of this.viewLights) light.dispose();
+    this.viewLights.length = 0;
+    this.viewCamera.clear();
+    this.viewScene.clear();
     this.gun?.dispose();
     this.gun = null;
   }
 }
 
 const TEMP_TARGET = new THREE.Vector3();
-const TEMP_FWD = new THREE.Vector3();

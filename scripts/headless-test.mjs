@@ -679,8 +679,10 @@ async function run() {
       Boolean(gunReport) && richest > gunReport.plainMeshes,
       'best ' + richest + ' vs common ' + (gunReport ? gunReport.plainMeshes : 'n/a'));
 
-    // The viewmodel must be parented to the camera, and the muzzle anchor the
-    // tracers spawn from must sit on the barrel rather than at the camera.
+    // The weapon renders through its own camera, so these checks read the view
+    // scene. The tracer anchor must sit on the barrel tip, near the eye, and the
+    // gun has to fill a real portion of the screen - that is what makes a
+    // viewmodel read as "held" rather than floating ahead of the player.
     const muzzleReport = await client.evaluate(`
       const g = window.__game;
       const dbg = window.__gameDebug;
@@ -688,38 +690,58 @@ async function run() {
       let muzzleNode = null;
       let meshes = 0;
       let bad = 0;
-      g.camera.traverse((child) => {
+      g.weapons.viewScene.traverse((child) => {
         if (child.name === 'muzzle') muzzleNode = child;
         if (!child.isMesh) return;
         meshes += 1;
         const p = child.getWorldPosition(new Vec());
         if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) bad += 1;
       });
-      const anchor = g.weapons.muzzleWorld(new Vec());
       g.camera.updateMatrixWorld(true);
       g.weapons.update(0.001, {
         damageMultiplier: 1, fireRateMultiplier: 1, spreadMultiplier: 1,
         criticalChance: 0, criticalMultiplier: 2, reloadTimeMultiplier: 1,
       }, { fireHeld: false, firePressed: false, aiming: false });
-      g.weapons.muzzleWorld(anchor);
+      const anchor = g.weapons.muzzleWorld(new Vec());
       const muzzlePos = muzzleNode ? muzzleNode.getWorldPosition(new Vec()) : new Vec();
-      const offset = anchor.clone().sub(muzzlePos);
-      const forward = new Vec(0, 0, -1).applyQuaternion(g.camera.quaternion);
-      const inHand = g.camera.getWorldPosition(new Vec()).distanceTo(anchor);
+      const eye = g.camera.getWorldPosition(new Vec());
+      const cam = g.weapons.viewCamera;
+      cam.updateMatrixWorld(true);
+      // The hold point, not the barrel tip: a rifle muzzle really is ~1 m from
+      // the eye, so muzzle distance says nothing about how close the gun is held.
+      const grip = g.weapons.viewModel.getWorldPosition(new Vec());
+      const clamp = (v) => Math.max(-1, Math.min(1, v));
+      const box = new dbg.THREE.Box3().setFromObject(g.weapons.viewModel);
+      let minY = Infinity;
+      let maxY = -Infinity;
+      let visible = 0;
+      for (const x of [box.min.x, box.max.x]) {
+        for (const y of [box.min.y, box.max.y]) {
+          for (const z of [box.min.z, box.max.z]) {
+            const view = new Vec(x, y, z).applyMatrix4(cam.matrixWorldInverse);
+            // Corners behind the near plane are clipped by the renderer; counting
+            // them projects to nonsense coordinates and explodes the span.
+            if (view.z > -cam.near) continue;
+            const p = view.applyMatrix4(cam.projectionMatrix);
+            visible += 1;
+            minY = Math.min(minY, p.y);
+            maxY = Math.max(maxY, p.y);
+          }
+        }
+      }
       return {
         muzzleNode: muzzleNode ? 1 : 0, meshes, bad,
-        offsetLength: offset.length(),
-        alongForward: offset.clone().normalize().dot(forward),
-        inHand,
+        offsetLength: anchor.distanceTo(muzzlePos),
+        holdDistance: eye.distanceTo(grip),
+        coverage: visible > 1 ? (clamp(maxY) - clamp(minY)) / 2 : 0,
       };
     `, cap(12000));
-    // Anchor is the barrel tip pushed 0.28 m down the view axis.
-    check('weapons: viewmodel gun is mounted in-hand with a barrel-locked muzzle anchor',
+    check('weapons: viewmodel is drawn by its own camera, held close to the eye',
       Boolean(muzzleReport) && muzzleReport.muzzleNode === 1 && muzzleReport.bad === 0
       && muzzleReport.meshes > 12
-      && Math.abs(muzzleReport.offsetLength - 0.28) < 0.02
-      && muzzleReport.alongForward > 0.99
-      && muzzleReport.inHand > 0.3 && muzzleReport.inHand < 2,
+      && muzzleReport.offsetLength < 0.02
+      && muzzleReport.holdDistance > 0.25 && muzzleReport.holdDistance < 0.55
+      && muzzleReport.coverage > 0.3 && muzzleReport.coverage <= 1,
       JSON.stringify(muzzleReport));
 
     // ---- operator bodies: the same rig must produce a real, on-scale body ---
@@ -822,7 +844,7 @@ async function run() {
     // Swapping slots must rebuild the viewmodel without leaking meshes.
     const swapReport = await client.evaluate(`
       const g = window.__game;
-      const count = () => { let n = 0; g.camera.traverse((c) => { if (c.isMesh) n += 1; }); return n; };
+      const count = () => { let n = 0; g.weapons.viewScene.traverse((c) => { if (c.isMesh) n += 1; }); return n; };
       const before = count();
       const from = g.weapons.activeSlot;
       const to = from === 0 ? 1 : 0;

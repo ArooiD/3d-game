@@ -134,6 +134,26 @@ export class CollisionWorld {
     return best;
   }
 
+  /**
+   * Surface a body of `radius` can rest on when its feet are at `feetY`. Unlike
+   * `surfaceHeight`, which samples the center point, this asks whether the
+   * footprint disc touches a top that is level with the feet. That is what keeps
+   * a capsule standing for the frames where its center has not yet caught up with
+   * a ledge it stepped onto; sampling the center alone dropped the player straight
+   * back off the step, which is the stutter felt near platform edges.
+   */
+  footprintSurface(x: number, z: number, feetY: number, radius: number, snap = 0.06): number {
+    let best = this.groundHeight(x, z);
+    for (const box of this.queryArea(x, z, radius)) {
+      if (!box.solid) continue;
+      if (x + radius <= box.minX || x - radius >= box.maxX) continue;
+      if (z + radius <= box.minZ || z - radius >= box.maxZ) continue;
+      if (box.topY > feetY + snap || box.topY <= best) continue;
+      best = box.topY;
+    }
+    return best;
+  }
+
   queryArea(x: number, z: number, pad: number): ColliderBox[] {
     const out: ColliderBox[] = [];
     const x0 = Math.floor((x - pad) / CELL_SIZE);
@@ -185,30 +205,48 @@ export class CollisionWorld {
     const steps = Math.max(1, Math.ceil(Math.max(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z)) / Math.max(0.05, radius * 0.5)));
     const dx = delta.x / steps, dy = delta.y / steps, dz = delta.z / steps;
     for (let i = 0; i < steps; i++) {
-      const supported = result.y <= this.surfaceHeight(result.x, result.z, result.y + EPSILON) + EPSILON;
+      const supported = result.y <= this.footprintSurface(result.x, result.z, result.y, radius) + EPSILON;
+      /** Ledge height gained by a step-up this sub-step, if any. */
+      let steppedTo = Number.NEGATIVE_INFINITY;
       for (const axis of ['x', 'z'] as const) {
         const amount = axis === 'x' ? dx : dz;
         if (amount === 0) continue;
         const next = { ...result, [axis]: result[axis] + amount };
         const hits = this.overlaps(next.x, result.y, next.z, radius, height);
-        if (hits.length) {
-          const top = Math.max(...hits.map(box => box.topY));
-          // A step needs support and enough headroom throughout the rise.
-          const rise = top - result.y;
-          if (supported && dy <= 0 && rise > 0 && rise <= maxStep &&
-              !this.overlaps(result.x, top, result.z, radius, height).length &&
-              !this.overlaps(next.x, top, next.z, radius, height).length) {
-            result.y = top;
-            result[axis] = next[axis];
-          } else {
-            result.hitWall = true;
-            const boundary = amount > 0
-              ? Math.min(...hits.map(box => axis === 'x' ? box.minX : box.minZ)) - radius
-              : Math.max(...hits.map(box => axis === 'x' ? box.maxX : box.maxZ)) + radius;
-            result[axis] = amount > 0 ? Math.max(result[axis], Math.min(next[axis], boundary))
-              : Math.min(result[axis], Math.max(next[axis], boundary));
-          }
-        } else result[axis] = next[axis];
+        if (!hits.length) { result[axis] = next[axis]; continue; }
+        const here = result[axis];
+        // Walking off a lip: the center has already passed the face we are moving
+        // toward, so the box only overlaps because the body radius reaches back
+        // over the edge. Clamping there froze horizontal speed (PlayerController
+        // zeroes velocity whenever an axis is clamped), which read as sticking to
+        // the edge while falling.
+        if (hits.every(box => {
+          const near = axis === 'x' ? box.minX : box.minZ;
+          const far = axis === 'x' ? box.maxX : box.maxZ;
+          return amount > 0 ? here >= far - EPSILON : here <= near + EPSILON;
+        })) {
+          result[axis] = next[axis];
+          continue;
+        }
+        const top = Math.max(...hits.map(box => box.topY));
+        const rise = top - result.y;
+        // A step needs support and enough headroom through the whole rise.
+        if (supported && dy <= 0 && rise > 0 && rise <= maxStep &&
+            !this.overlaps(result.x, top, result.z, radius, height).length &&
+            !this.overlaps(next.x, top, next.z, radius, height).length) {
+          // Move first, rise below. Clamping a step instead pinned the player a
+          // radius short of the face forever: the center only gains support once
+          // it is over the ledge, and the clamp made that unreachable.
+          result[axis] = next[axis];
+          steppedTo = Math.max(steppedTo, top);
+        } else {
+          result.hitWall = true;
+          const boundary = amount > 0
+            ? Math.min(...hits.map(box => axis === 'x' ? box.minX : box.minZ)) - radius
+            : Math.max(...hits.map(box => axis === 'x' ? box.maxX : box.maxZ)) + radius;
+          result[axis] = amount > 0 ? Math.max(result[axis], Math.min(next[axis], boundary))
+            : Math.min(result[axis], Math.max(next[axis], boundary));
+        }
       }
       let ny = result.y + dy;
       if (dy > 0 && !result.hitCeiling) {
@@ -221,9 +259,18 @@ export class CollisionWorld {
           }
         }
       } else if (result.hitCeiling) ny = result.y;
-      const surface = this.surfaceHeight(result.x, result.z, result.y + EPSILON);
-      result.grounded = dy <= 0 && ny <= surface + EPSILON;
-      result.y = result.grounded ? surface : ny;
+      if (steppedTo > result.y) {
+        // Stay on the ledge even while the center is a moment short of it; the
+        // horizontal move is already committed and support arrives next frame.
+        result.y = Math.max(steppedTo, ny);
+        result.grounded = true;
+      } else {
+        // Footprint, not center: a capsule that just stepped onto a ledge is
+        // still leaning on it with its edge while the center catches up.
+        const surface = this.footprintSurface(result.x, result.z, result.y, radius);
+        result.grounded = dy <= 0 && ny <= surface + EPSILON;
+        result.y = result.grounded ? surface : ny;
+      }
     }
     return result;
   }

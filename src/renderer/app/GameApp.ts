@@ -230,6 +230,7 @@ export class GameApp {
     }
 
     this.renderer.render(this.scene, this.camera);
+    this.weapons.renderViewmodel(this.renderer);
     if (this.debug.isOpen) this.reportDebug();
   }
 
