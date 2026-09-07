@@ -3,11 +3,14 @@ import { RARITY_HEX } from '../../../shared/constants';
 import type { Weapon } from '../../../shared/types';
 import { buildGunModel, fitGunLength } from '../weapons/WeaponModels';
 import { rng } from '../core/Rng';
+import { bus, GameEvents } from '../core/EventBus';
+import type { EnemyPartId, EnemyPartVisualSeverity } from '../enemies/EnemyParts';
 
 /**
  * Pooled visual effects: impact sparks, muzzle flashes, tracers, explosion
  * rings, floating damage numbers and loot beams. Everything is allocated up
- * front and recycled, so combat produces no GC pressure.
+ * front and recycled, so ordinary combat produces no GC pressure. Rare enemy
+ * limb breaks are allowed to clone a few existing meshes for short-lived debris.
  */
 
 interface Particle {
@@ -45,6 +48,40 @@ interface Ring {
   active: boolean;
 }
 
+interface EnemyPartVisualEvent {
+  id: string;
+  part: EnemyPartId;
+  severity: EnemyPartVisualSeverity;
+  root: THREE.Object3D;
+  meshes: THREE.Mesh[];
+  isBoss: boolean;
+  height: number;
+  groundY: number;
+}
+
+interface DetachedEnemyPart {
+  group: THREE.Group;
+  velocity: THREE.Vector3;
+  spin: THREE.Vector3;
+  life: number;
+  groundY: number;
+  landed: boolean;
+}
+
+interface DamageSparkEmitter {
+  owner: THREE.Object3D;
+  anchor: THREE.Object3D;
+  cooldown: number;
+  life: number;
+  strength: number;
+}
+
+interface DamageAttachment {
+  owner: THREE.Object3D;
+  part: EnemyPartId;
+  mesh: THREE.Mesh;
+}
+
 const PARTICLE_POOL = 340;
 const TRACER_POOL = 40;
 const POPUP_POOL = 60;
@@ -58,10 +95,18 @@ export class EffectsSystem {
   private popups: Popup[] = [];
   private rings: Ring[] = [];
   private flashes: { mesh: THREE.Mesh; light: THREE.PointLight | null; life: number; maxLife: number }[] = [];
+  private detachedEnemyParts: DetachedEnemyPart[] = [];
+  private damageSparkEmitters: DamageSparkEmitter[] = [];
+  private damageAttachments: DamageAttachment[] = [];
   private particleGeo: THREE.BufferGeometry;
   private tracerGeo: THREE.BufferGeometry;
   private ringGeo: THREE.BufferGeometry;
   private flashGeo: THREE.BufferGeometry;
+  private damageSocketGeo: THREE.BufferGeometry;
+  private damageRingGeo: THREE.BufferGeometry;
+  private damagePatchGeo: THREE.BufferGeometry;
+  private damageOuterMat: THREE.MeshLambertMaterial;
+  private damageInnerMat: THREE.MeshLambertMaterial;
   private materials: THREE.Material[] = [];
   private overlay: HTMLElement;
   private camera: THREE.Camera | null = null;
@@ -84,7 +129,19 @@ export class EffectsSystem {
     this.ringGeo.rotateX(-Math.PI / 2);
     this.flashGeo = new THREE.IcosahedronGeometry(0.34, 0);
 
+    // Shared visual-damage geometry. These attachments live on enemy bones but
+    // reference resources owned here, so losing limbs does not allocate a fresh
+    // material/geometry pair for every actor.
+    this.damageSocketGeo = new THREE.CylinderGeometry(0.5, 0.42, 1, 18);
+    this.damageRingGeo = new THREE.TorusGeometry(0.5, 0.14, 8, 20);
+    this.damageRingGeo.rotateX(Math.PI / 2);
+    this.damagePatchGeo = new THREE.BoxGeometry(1, 1, 1);
+    this.damageOuterMat = new THREE.MeshLambertMaterial({ color: 0x24262c, emissive: 0x120d0a });
+    this.damageInnerMat = new THREE.MeshLambertMaterial({ color: 0x6c3229, emissive: 0x220b06 });
+    this.materials.push(this.damageOuterMat, this.damageInnerMat);
+
     this.buildPools();
+    bus.on<EnemyPartVisualEvent>(GameEvents.EnemyPartVisual, this.onEnemyPartVisual, this);
   }
 
   setCamera(camera: THREE.Camera): void {
@@ -338,6 +395,212 @@ export class EffectsSystem {
     this.ring(point.clone().setY(point.y + 0.15), radius, 0xffa04a, 0.55);
   }
 
+  // ---------------------------------------------------- enemy visual damage
+
+  private readonly onEnemyPartVisual = (payload: EnemyPartVisualEvent): void => {
+    if (!payload?.root || !payload.part) return;
+    payload.root.updateWorldMatrix(true, true);
+    const point = this.damagePoint(payload);
+
+    if (payload.severity === 'damaged') {
+      if (payload.part === 'weapon') {
+        this.burst(point, { count: 5, color: 'spark', speed: 4, life: 0.35, gravity: 7, size: 0.55 });
+        this.startWeaponSparks(payload, 0.55);
+        this.attachDamagePatch(payload);
+      } else if (payload.part === 'head') {
+        this.burst(point, { count: 4, color: 'debris', speed: 3, life: 0.45, size: 0.55 });
+        this.burst(point, { count: 3, color: 'blood', speed: 2.5, life: 0.35, size: 0.5 });
+        this.attachDamagePatch(payload);
+      } else if (payload.part !== 'torso') {
+        this.burst(point, { count: 4, color: 'blood', speed: 3.2, life: 0.34, size: 0.55 });
+        this.burst(point, { count: 2, color: 'debris', speed: 2.4, life: 0.45, size: 0.45 });
+      }
+      return;
+    }
+
+    if (payload.part === 'weapon') {
+      this.burst(point, { count: 12, color: 'spark', speed: 6.5, life: 0.55, gravity: 7, size: 0.8 });
+      this.burst(point, { count: 5, color: 'debris', speed: 4, life: 0.65, size: 0.65 });
+      this.startWeaponSparks(payload, 1.25);
+      this.attachDamagePatch(payload);
+      return;
+    }
+
+    if (payload.part === 'head') {
+      this.burst(point, { count: 8, color: 'debris', speed: 4.5, life: 0.65, size: 0.75 });
+      this.burst(point, { count: 7, color: 'blood', speed: 5.5, life: 0.5, size: 0.75 });
+      this.attachDamagePatch(payload);
+      return;
+    }
+
+    if (payload.part === 'armR') {
+      // The ranged weapon is parented to the right forearm. Once that arm leaves
+      // the body any previous damaged-gun spark emitter must leave with it rather
+      // than hovering in front of an invisible hand.
+      this.damageSparkEmitters = this.damageSparkEmitters.filter((emitter) => emitter.owner !== payload.root);
+    }
+
+    if (payload.part === 'armL' || payload.part === 'armR' || payload.part === 'legL' || payload.part === 'legR') {
+      this.burst(point, { count: 13, color: 'blood', speed: 6.5, life: 0.55, size: 0.9 });
+      this.burst(point, { count: 7, color: 'debris', speed: 5, life: 0.75, size: 0.75 });
+      this.spawnDetachedEnemyPart(payload);
+      this.attachDamageSocket(payload);
+    }
+  };
+
+  private damagePoint(payload: EnemyPartVisualEvent): THREE.Vector3 {
+    const anchor = this.damageAnchor(payload);
+    const point = new THREE.Vector3();
+    if (anchor) anchor.getWorldPosition(point);
+    else payload.root.getWorldPosition(point);
+    if (payload.part === 'head') point.y += payload.height * 0.07;
+    return point;
+  }
+
+  private damageAnchor(payload: EnemyPartVisualEvent): THREE.Object3D | null {
+    switch (payload.part) {
+      case 'head':
+        return payload.root.getObjectByName('head');
+      case 'armL':
+        return payload.root.getObjectByName('armL');
+      case 'armR':
+        return payload.root.getObjectByName('armR');
+      case 'legL':
+        return payload.root.getObjectByName('thighL');
+      case 'legR':
+        return payload.root.getObjectByName('thighR');
+      case 'weapon':
+        return payload.root.getObjectByName('muzzle') ?? payload.root.getObjectByName('forearmR');
+      default:
+        return payload.root.getObjectByName('chest');
+    }
+  }
+
+  private spawnDetachedEnemyPart(payload: EnemyPartVisualEvent): void {
+    const source = payload.meshes.filter((mesh) => mesh.visible && mesh.geometry);
+    if (source.length === 0) return;
+
+    const center = new THREE.Vector3();
+    const world = new THREE.Vector3();
+    for (const mesh of source) {
+      mesh.updateWorldMatrix(true, false);
+      center.add(world.setFromMatrixPosition(mesh.matrixWorld));
+    }
+    center.multiplyScalar(1 / source.length);
+
+    const detached = new THREE.Group();
+    detached.name = `detached-${payload.id}-${payload.part}`;
+    this.group.updateWorldMatrix(true, false);
+    detached.position.copy(center);
+    this.group.worldToLocal(detached.position);
+    this.group.add(detached);
+    detached.updateWorldMatrix(true, false);
+
+    const inverse = detached.matrixWorld.clone().invert();
+    const local = new THREE.Matrix4();
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    for (const mesh of source) {
+      local.multiplyMatrices(inverse, mesh.matrixWorld);
+      local.decompose(pos, quat, scale);
+      const clone = new THREE.Mesh(mesh.geometry, mesh.material);
+      clone.position.copy(pos);
+      clone.quaternion.copy(quat);
+      clone.scale.copy(scale);
+      clone.castShadow = true;
+      clone.receiveShadow = false;
+      detached.add(clone);
+    }
+
+    const side = payload.part.endsWith('L') ? -1 : payload.part.endsWith('R') ? 1 : rng.bool() ? 1 : -1;
+    const actorRotation = payload.root.getWorldQuaternion(new THREE.Quaternion());
+    const sideVector = new THREE.Vector3(side, 0, 0).applyQuaternion(actorRotation).normalize();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(actorRotation).normalize();
+    const leg = payload.part === 'legL' || payload.part === 'legR';
+    const velocity = sideVector.multiplyScalar(leg ? 2.2 : 3.4)
+      .addScaledVector(forward, rng.float(-1.4, 1.4));
+    velocity.y += leg ? rng.float(2.8, 4.0) : rng.float(4.1, 5.8);
+
+    this.detachedEnemyParts.push({
+      group: detached,
+      velocity,
+      spin: new THREE.Vector3(rng.float(-7, 7), rng.float(-7, 7), rng.float(-7, 7)),
+      life: rng.float(3.6, 4.8),
+      groundY: payload.groundY + 0.06,
+      landed: false,
+    });
+  }
+
+  private attachDamageSocket(payload: EnemyPartVisualEvent): void {
+    if (payload.isBoss) return;
+    const anchor = this.damageAnchor(payload);
+    if (!anchor) return;
+    if (this.damageAttachments.some((entry) => entry.owner === payload.root && entry.part === payload.part)) return;
+
+    const leg = payload.part === 'legL' || payload.part === 'legR';
+    const radius = payload.height * (leg ? 0.055 : 0.042);
+    const depth = payload.height * (leg ? 0.032 : 0.026);
+
+    const socket = new THREE.Mesh(this.damageSocketGeo, this.damageInnerMat);
+    socket.scale.set(radius * 2, depth, radius * 2);
+    socket.position.y = -depth * 0.2;
+    socket.castShadow = true;
+    anchor.add(socket);
+
+    const collar = new THREE.Mesh(this.damageRingGeo, this.damageOuterMat);
+    collar.scale.setScalar(radius * 2.25);
+    collar.position.y = -depth * 0.05;
+    collar.castShadow = true;
+    anchor.add(collar);
+
+    this.damageAttachments.push(
+      { owner: payload.root, part: payload.part, mesh: socket },
+      { owner: payload.root, part: payload.part, mesh: collar },
+    );
+  }
+
+  private attachDamagePatch(payload: EnemyPartVisualEvent): void {
+    const anchor = this.damageAnchor(payload);
+    if (!anchor) return;
+    if (this.damageAttachments.some((entry) => entry.owner === payload.root && entry.part === payload.part)) return;
+
+    const patch = new THREE.Mesh(this.damagePatchGeo, this.damageOuterMat);
+    patch.castShadow = true;
+    if (payload.part === 'head') {
+      patch.position.set(0, payload.height * 0.075, -payload.height * 0.062);
+      patch.scale.set(payload.height * 0.055, payload.height * 0.017, payload.height * 0.009);
+      patch.rotation.z = 0.18;
+    } else {
+      // Muzzle anchor faces along -Z; move the scorch block back toward the gun.
+      patch.position.set(0, 0, payload.height * 0.065);
+      patch.scale.set(payload.height * 0.024, payload.height * 0.018, payload.height * 0.055);
+      patch.rotation.z = -0.12;
+    }
+    anchor.add(patch);
+    this.damageAttachments.push({ owner: payload.root, part: payload.part, mesh: patch });
+  }
+
+  private startWeaponSparks(payload: EnemyPartVisualEvent, strength: number): void {
+    const anchor = payload.root.getObjectByName('muzzle') ?? payload.root.getObjectByName('forearmR');
+    if (!anchor) return;
+    const existing = this.damageSparkEmitters.find((emitter) => emitter.owner === payload.root);
+    if (existing) {
+      existing.anchor = anchor;
+      existing.strength = Math.max(existing.strength, strength);
+      existing.life = Math.max(existing.life, strength > 1 ? 20 : 11);
+      existing.cooldown = 0;
+      return;
+    }
+    this.damageSparkEmitters.push({
+      owner: payload.root,
+      anchor,
+      cooldown: 0,
+      life: strength > 1 ? 20 : 11,
+      strength,
+    });
+  }
+
   // ------------------------------------------------------------------ frame
 
   update(dt: number): void {
@@ -397,7 +660,79 @@ export class EffectsSystem {
       if (flash.light) flash.light.intensity = 9 * t;
     }
 
+    this.updateDetachedEnemyParts(dt);
+    this.updateDamageSparkEmitters(dt);
+    this.pruneDamageAttachments();
     this.updatePopups(dt);
+  }
+
+  private updateDetachedEnemyParts(dt: number): void {
+    for (let i = this.detachedEnemyParts.length - 1; i >= 0; i--) {
+      const piece = this.detachedEnemyParts[i]!;
+      piece.life -= dt;
+      if (piece.life <= 0) {
+        piece.group.removeFromParent();
+        piece.group.clear();
+        this.detachedEnemyParts.splice(i, 1);
+        continue;
+      }
+
+      if (!piece.landed) {
+        piece.velocity.y -= 17 * dt;
+        piece.group.position.addScaledVector(piece.velocity, dt);
+        piece.group.rotation.x += piece.spin.x * dt;
+        piece.group.rotation.y += piece.spin.y * dt;
+        piece.group.rotation.z += piece.spin.z * dt;
+
+        if (piece.group.position.y <= piece.groundY) {
+          piece.group.position.y = piece.groundY;
+          if (Math.abs(piece.velocity.y) > 1.3) {
+            piece.velocity.y = Math.abs(piece.velocity.y) * 0.24;
+            piece.velocity.x *= 0.62;
+            piece.velocity.z *= 0.62;
+            piece.spin.multiplyScalar(0.68);
+          } else {
+            piece.velocity.set(0, 0, 0);
+            piece.spin.set(0, 0, 0);
+            piece.landed = true;
+          }
+        }
+      }
+    }
+  }
+
+  private updateDamageSparkEmitters(dt: number): void {
+    for (let i = this.damageSparkEmitters.length - 1; i >= 0; i--) {
+      const emitter = this.damageSparkEmitters[i]!;
+      emitter.life -= dt;
+      if (emitter.life <= 0 || emitter.owner.parent === null) {
+        this.damageSparkEmitters.splice(i, 1);
+        continue;
+      }
+
+      emitter.cooldown -= dt;
+      if (emitter.cooldown > 0) continue;
+      emitter.anchor.getWorldPosition(this.scratch);
+      const strong = emitter.strength > 1;
+      this.burst(this.scratch, {
+        count: strong ? 4 : 2,
+        color: 'spark',
+        speed: strong ? 4.5 : 2.8,
+        life: strong ? 0.42 : 0.3,
+        gravity: 6,
+        size: strong ? 0.62 : 0.42,
+      });
+      emitter.cooldown = rng.float(strong ? 0.1 : 0.22, strong ? 0.24 : 0.48);
+    }
+  }
+
+  private pruneDamageAttachments(): void {
+    for (let i = this.damageAttachments.length - 1; i >= 0; i--) {
+      const attachment = this.damageAttachments[i]!;
+      if (attachment.owner.parent !== null) continue;
+      attachment.mesh.removeFromParent();
+      this.damageAttachments.splice(i, 1);
+    }
   }
 
   private updatePopups(dt: number): void {
@@ -433,14 +768,23 @@ export class EffectsSystem {
   }
 
   dispose(): void {
+    bus.offOwner(this);
     for (const popup of this.popups) popup.el.remove();
     this.popups.length = 0;
+    for (const piece of this.detachedEnemyParts) piece.group.removeFromParent();
+    this.detachedEnemyParts.length = 0;
+    this.damageSparkEmitters.length = 0;
+    for (const attachment of this.damageAttachments) attachment.mesh.removeFromParent();
+    this.damageAttachments.length = 0;
     for (const mat of this.materials) mat.dispose();
     this.materials.length = 0;
     this.particleGeo.dispose();
     this.tracerGeo.dispose();
     this.ringGeo.dispose();
     this.flashGeo.dispose();
+    this.damageSocketGeo.dispose();
+    this.damageRingGeo.dispose();
+    this.damagePatchGeo.dispose();
     this.particles.length = 0;
     this.tracers.length = 0;
     this.rings.length = 0;

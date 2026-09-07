@@ -79,6 +79,9 @@ const BONES = [
   'footR',
 ] as const satisfies readonly BoneName[];
 
+type BrokenParts = Partial<Record<'head' | 'torso' | 'armL' | 'armR' | 'legL' | 'legR' | 'weapon', boolean>>;
+const NO_BROKEN_PARTS: BrokenParts = Object.freeze({});
+
 /**
  * Persistent two-handed low-ready pose for ordinary ranged enemies.
  *
@@ -98,6 +101,78 @@ function rangedCarryAdd(P: Pose, weight = 1, combatReady = false): void {
   P.add('shoulderL', -3, 3, -12, w);
   P.add('armL', 18, 5, -5, w);
   P.add('forearmL', -10, -3, 0, w);
+}
+
+/** Broken gun / missing shooting arm: lower the weapon and protect the torso. */
+function disabledRangedAdd(P: Pose, missingRightArm: boolean, weight = 1): void {
+  P.add('chest', 5, 0, missingRightArm ? -5 : 3, weight);
+  P.add('spine', -2, 0, missingRightArm ? 4 : -2, weight);
+
+  if (!missingRightArm) {
+    // The ruined gun stays attached and sparks, but no longer snaps into ADS.
+    P.add('shoulderR', 3, -4, 13, weight);
+    P.add('armR', -5, -3, 5, weight);
+    P.add('forearmR', 18, 4, 0, weight);
+  }
+
+  P.add('shoulderL', -4, 6, -15, weight);
+  P.add('armL', 24, 10, -7, weight);
+  P.add('forearmL', -30, -8, 0, weight);
+}
+
+/** Persistent posture changes driven by EnemyParts state stored on the actor root. */
+function injuryAdd(P: Pose, broken: BrokenParts, phase: number, normalisedSpeed: number): void {
+  if (broken.head) {
+    P.add('neck', 5, -2, 7, 1);
+    P.add('head', -7, Math.sin(phase * Math.PI * 4) * 2.2, -9, 1);
+    P.add('chest', 2.5, 0, -2, 1);
+  }
+
+  if (broken.armL && !broken.armR) {
+    // One-handed weapon use: shift weight toward the intact right side.
+    P.add('spine', -1, 0, 4, 1);
+    P.add('chest', 2, -1, 4, 1);
+    P.add('shoulderR', -2, -3, 4, 1);
+  } else if (broken.armR && !broken.armL) {
+    // Missing shooting arm: the remaining hand instinctively guards the wound.
+    P.add('spine', -3, 0, -6, 1);
+    P.add('chest', 4, 0, -7, 1);
+    P.add('shoulderL', -5, 8, -18, 1);
+    P.add('armL', 28, 12, -9, 1);
+    P.add('forearmL', -34, -8, 0, 1);
+  } else if (broken.armL && broken.armR) {
+    P.add('spine', -5, 0, 0, 1);
+    P.add('chest', 8, 0, 0, 1);
+  }
+
+  const legL = Boolean(broken.legL);
+  const legR = Boolean(broken.legR);
+  const moving = THREE.MathUtils.clamp(normalisedSpeed * 1.7, 0, 1);
+  const cycle = Math.sin(phase * Math.PI * 2);
+
+  if (legL !== legR) {
+    const side = legL ? -1 : 1;
+    // A pronounced hip drop plus compensation in spine/chest makes the speed
+    // penalty readable as a limp instead of simply looking like slow playback.
+    P.hipRoll += side * (4 + Math.abs(cycle) * 4.5 * moving);
+    P.hipPitch += 2.5 * moving;
+    P.add('spine', -3, 0, -side * 5.5, 1);
+    P.add('chest', 2, 0, -side * 2.5, 1);
+
+    const supportThigh: BoneName = legL ? 'thighR' : 'thighL';
+    const supportShin: BoneName = legL ? 'shinR' : 'shinL';
+    P.add(supportThigh, -4 + cycle * 5, 0, -side * 2, moving);
+    P.add(supportShin, 7 + Math.max(0, -cycle) * 9, 0, 0, moving);
+  } else if (legL && legR) {
+    // Both legs gone: the enemy can still drag itself at the heavily reduced
+    // gameplay speed, but the torso stays low and pitches forward instead of
+    // gliding upright through the world.
+    P.hipPitch += 12;
+    P.hipRoll += Math.sin(phase * Math.PI * 2) * 3 * moving;
+    P.add('spine', -10, 0, 0, 1);
+    P.add('chest', 8, 0, 0, 1);
+    crouchAdd(P, 0.65);
+  }
 }
 
 export class EnemyAnimator {
@@ -191,23 +266,28 @@ export class EnemyAnimator {
       gait(base, this.phase * RUN.cycle / WALK.cycle, RUN, this.runWeight);
     }
 
+    // EnemyParts stores its persistent state on Enemy.group, the direct parent
+    // of skeleton.root. Imported rigs can also put it on the skeleton root itself.
+    const broken = this.brokenParts();
+    const rangedDisabled = Boolean(broken.armR || broken.weapon);
+
     // --- additive combat layers --------------------------------------------
     this.aimWeight += ((context.aiming ? 1 : 0) - this.aimWeight) * (1 - Math.exp(-dt * 12));
 
     // Raider/heavy/sniper weapons used to hang from the right hand because the
     // default rig only raised the arms while actively shooting. Keep a two-hand
-    // carry pose alive for every ordinary ranged enemy, then reduce its weight
-    // while the stronger ADS pose takes over. Boss weapons are integrated into
-    // their forearms and deliberately keep the boss-specific animation.
+    // carry pose alive for every ordinary ranged enemy, unless EnemyParts has
+    // removed the shooting arm or disabled the gun.
     if (!context.melee && !context.boss) {
       const carryWeight = 1 - this.aimWeight * 0.55;
       const combatReady = context.state === 'alert' || context.state === 'chase' ||
         context.state === 'attack' || context.state === 'retreat';
-      rangedCarryAdd(layer, carryWeight, combatReady);
+      if (rangedDisabled) disabledRangedAdd(layer, Boolean(broken.armR), 1);
+      else rangedCarryAdd(layer, carryWeight, combatReady);
     }
 
-    if (this.aimWeight > .001) aimAdd(layer, .9 * this.aimWeight);
-    if (context.braced) braceAdd(layer, 1);
+    if (this.aimWeight > .001 && !rangedDisabled) aimAdd(layer, .9 * this.aimWeight);
+    if (context.braced && !rangedDisabled) braceAdd(layer, 1);
     if (context.crouched) crouchAdd(layer, 1);
     if (context.state === 'patrol') patrolAdd(layer, this.phase, 1);
     if (context.state === 'retreat') retreatAdd(layer, this.phase, 1);
@@ -215,7 +295,7 @@ export class EnemyAnimator {
 
     if (context.melee && context.swing >= 0) {
       swingAdd(layer, THREE.MathUtils.clamp(context.swing, 0, 1), 1);
-    } else if (context.sinceShot >= 0) {
+    } else if (context.sinceShot >= 0 && !rangedDisabled) {
       // Shot duration is ~0.22s; the layer decays across it.
       const t = context.sinceShot / 0.22;
       if (t <= 1) {
@@ -229,8 +309,16 @@ export class EnemyAnimator {
       if (t <= 1) hitAdd(layer, context.hitRegion, t, context.hitSide, 1 - t * 0.35);
     }
 
+    injuryAdd(layer, broken, this.phase, normalised);
+
     this.applyBlended(base, layer);
     this.applyRoot(base);
+  }
+
+  private brokenParts(): BrokenParts {
+    const local = this.skeleton.root.userData.enemyBrokenParts as BrokenParts | undefined;
+    const parent = this.skeleton.root.parent?.userData.enemyBrokenParts as BrokenParts | undefined;
+    return parent ?? local ?? NO_BROKEN_PARTS;
   }
 
   /** Writes bind + pose deltas onto the bones. */

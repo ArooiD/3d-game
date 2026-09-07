@@ -73,6 +73,8 @@ export const GameEvents = {
   EnemyKilled: 'enemy:killed',
   EnemyDamaged: 'enemy:damaged',
   EnemyPartBroken: 'enemy:part-broken',
+  /** Internal visual hook carrying the affected rig/meshes to EffectsSystem. */
+  EnemyPartVisual: 'enemy:part-visual',
   EnemySpawned: 'enemy:spawned',
   PlayerDamaged: 'player:damaged',
   PlayerShieldBreak: 'player:shieldbreak',

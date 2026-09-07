@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import { bus, GameEvents } from '../core/EventBus';
 import type { TargetRegistry } from './TargetRegistry';
 
-/** Anatomical / equipment slots understood by combat and future gore/armour UI. */
+/** Anatomical / equipment slots understood by combat and visual damage. */
 export type EnemyPartId =
   | 'head'
   | 'torso'
@@ -10,6 +11,9 @@ export type EnemyPartId =
   | 'legL'
   | 'legR'
   | 'weapon';
+
+export type EnemyBrokenPartFlags = Partial<Record<EnemyPartId, boolean>>;
+export type EnemyPartVisualSeverity = 'damaged' | 'destroyed';
 
 export interface EnemyPartHit {
   part: EnemyPartId;
@@ -36,6 +40,7 @@ export interface EnemyPartSnapshot {
   integrity: number;
   maxIntegrity: number;
   ratio: number;
+  damaged: boolean;
   destroyed: boolean;
   damageMultiplier: number;
 }
@@ -52,6 +57,7 @@ interface PartState extends PartConfig {
   id: EnemyPartId;
   integrity: number;
   maxIntegrity: number;
+  damaged: boolean;
   destroyed: boolean;
 }
 
@@ -72,7 +78,10 @@ const PART_CONFIG: Record<EnemyPartId, PartConfig> = {
   armR: { damageMultiplier: 0.82, integrityFraction: 0.34, criticalPart: false, breakable: true, detachable: true },
   legL: { damageMultiplier: 0.9, integrityFraction: 0.42, criticalPart: false, breakable: true, detachable: true },
   legR: { damageMultiplier: 0.9, integrityFraction: 0.42, criticalPart: false, breakable: true, detachable: true },
-  weapon: { damageMultiplier: 0.55, integrityFraction: 0.24, criticalPart: false, breakable: true, detachable: true },
+  // A destroyed gun remains attached so it can visibly spark instead of simply
+  // vanishing. Losing the right arm still takes the gun with it because the gun
+  // meshes are physically parented under forearmR.
+  weapon: { damageMultiplier: 0.55, integrityFraction: 0.24, criticalPart: false, breakable: true, detachable: false },
 };
 
 /**
@@ -104,9 +113,17 @@ export class EnemyParts {
         ...config,
         integrity: maxIntegrity,
         maxIntegrity,
+        damaged: false,
         destroyed: false,
       });
       this.meshes.set(id, []);
+    }
+
+    // Animation deliberately reads this plain record through the rig parent. It
+    // keeps EnemyAnimator independent of the combat system while still allowing
+    // persistent one-arm / limp / damaged-weapon poses.
+    if (!this.target.root.userData.enemyBrokenParts) {
+      this.target.root.userData.enemyBrokenParts = {} as EnemyBrokenPartFlags;
     }
 
     this.discoverMeshes();
@@ -140,8 +157,8 @@ export class EnemyParts {
 
   /**
    * Applies raw weapon damage to one part and returns the amount the regular
-   * enemy health/shield system should receive. Breaking limbs also applies a
-   * small persistent gameplay impairment through the target's public stats.
+   * enemy health/shield system should receive. At half integrity a part emits a
+   * one-shot visual-damage event; zero integrity emits the destruction event.
    */
   applyDamage(part: EnemyPartId | null | undefined, amount: number): EnemyPartDamageResult {
     const id = part ?? 'torso';
@@ -153,13 +170,16 @@ export class EnemyParts {
       state.integrity = Math.max(0, state.integrity - safeAmount);
       if (state.integrity <= 0) {
         state.destroyed = true;
+        state.damaged = true;
         this.breakPart(state.id);
+      } else if (!state.damaged && state.integrity <= state.maxIntegrity * 0.5) {
+        state.damaged = true;
+        this.emitVisual(state.id, 'damaged');
       }
     }
 
     // Already-destroyed non-detached critical parts stay vulnerable. A ruined
-    // helmet/head therefore remains a useful precision target rather than
-    // becoming an invisible invulnerable zone.
+    // helmet/head or disabled gun therefore remains a readable precision target.
     const multiplier = state.damageMultiplier * (state.destroyed && !state.detachable ? 1.08 : 1);
     return {
       part: state.id,
@@ -181,6 +201,7 @@ export class EnemyParts {
       integrity: state.integrity,
       maxIntegrity: state.maxIntegrity,
       ratio: state.integrity / Math.max(1, state.maxIntegrity),
+      damaged: state.damaged,
       destroyed: state.destroyed,
       damageMultiplier: state.damageMultiplier,
     };
@@ -225,6 +246,7 @@ export class EnemyParts {
     this.addArm('R', 'armR', height, bodyRadius);
     this.addLeg('L', 'legL', height, bodyRadius);
     this.addLeg('R', 'legR', height, bodyRadius);
+    this.addWeapon(height, bodyRadius);
   }
 
   private addArm(side: 'L' | 'R', part: 'armL' | 'armR', height: number, bodyRadius: number): void {
@@ -255,33 +277,85 @@ export class EnemyParts {
     this.addSphere(part, shin, 0, -shinLength * 0.82, -radius * 0.08, radius * 0.82);
   }
 
+  private addWeapon(height: number, bodyRadius: number): void {
+    const behavior = (this.target as unknown as { definition?: { behavior?: string } }).definition?.behavior;
+    if (behavior !== 'raider' && behavior !== 'heavy' && behavior !== 'sniper') return;
+
+    const forearm = this.target.root.getObjectByName('forearmR');
+    const muzzle = this.target.root.getObjectByName('muzzle');
+    if (!forearm || !muzzle) return;
+
+    // EnemyModels keeps the muzzle on forearmR. Reusing that authored endpoint
+    // lets the weapon hit volumes automatically fit raider, heavy and sniper gun
+    // lengths without duplicating those dimensions here.
+    const y = muzzle.parent === forearm ? muzzle.position.y : -height * 0.17;
+    const endZ = muzzle.parent === forearm ? muzzle.position.z : -height * 0.5;
+    const radius = Math.max(height * 0.034, bodyRadius * 0.17);
+    this.addSphere('weapon', forearm, 0, y, endZ * 0.3, radius * 1.15);
+    this.addSphere('weapon', forearm, 0, y, endZ * 0.57, radius);
+    this.addSphere('weapon', forearm, 0, y, endZ * 0.82, radius * 0.82);
+  }
+
   private addSphere(part: EnemyPartId, anchor: THREE.Object3D, x: number, y: number, z: number, radius: number): void {
     this.volumes.push({ part, anchor, offset: new THREE.Vector3(x, y, z), radius });
   }
 
   private breakPart(part: EnemyPartId): void {
     const state = this.states.get(part)!;
-    const actor = this.target as unknown as { moveSpeed?: number; damage?: number };
+    const actor = this.target as unknown as {
+      moveSpeed?: number;
+      damage?: number;
+      definition?: { behavior?: string };
+    };
+    const flags = this.target.root.userData.enemyBrokenParts as EnemyBrokenPartFlags;
+    flags[part] = true;
 
-    // Functional damage is intentionally modest: the player gets readable
-    // feedback without turning a single limb break into a soft-lock.
+    // Functional damage makes the visual break matter in combat. A missing
+    // shooting arm / ruined weapon is a much bigger impairment than losing the
+    // support hand, while leg damage produces a clear limp without freezing AI.
     if (part === 'legL' || part === 'legR') {
-      if (typeof actor.moveSpeed === 'number') actor.moveSpeed *= this.target.isBoss ? 0.92 : 0.78;
+      if (typeof actor.moveSpeed === 'number') {
+        actor.moveSpeed *= this.target.isBoss ? 0.92 : 0.68;
+        if (flags.legL && flags.legR && !this.target.isBoss) actor.moveSpeed *= 0.48;
+      }
     } else if (part === 'armR') {
-      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.9 : 0.72;
+      if (typeof actor.damage === 'number') {
+        actor.damage *= actor.definition?.behavior === 'rusher' ? 0.58 : this.target.isBoss ? 0.88 : 0.18;
+      }
     } else if (part === 'armL') {
-      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.94 : 0.88;
+      if (typeof actor.damage === 'number') {
+        actor.damage *= actor.definition?.behavior === 'rusher' ? 0.62 : this.target.isBoss ? 0.94 : 0.82;
+      }
     } else if (part === 'head') {
-      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.94 : 0.82;
+      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.94 : 0.8;
     } else if (part === 'weapon') {
-      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.85 : 0.58;
+      if (typeof actor.damage === 'number') actor.damage *= this.target.isBoss ? 0.82 : 0.28;
     }
+
+    this.emitVisual(part, 'destroyed');
 
     if (!state.detachable || !this.detachable) return;
     for (const mesh of this.meshes.get(part) ?? []) {
       mesh.visible = false;
       mesh.userData.enemyPartBroken = true;
     }
+  }
+
+  private emitVisual(part: EnemyPartId, severity: EnemyPartVisualSeverity): void {
+    // Emit before destruction hides meshes. EffectsSystem is synchronous and
+    // clones the current animated world transforms into short-lived debris.
+    this.target.root.updateWorldMatrix(true, true);
+    const worldRoot = this.target.root.getWorldPosition(new THREE.Vector3());
+    bus.emit(GameEvents.EnemyPartVisual, {
+      id: this.target.id,
+      part,
+      severity,
+      root: this.target.root,
+      meshes: [...(this.meshes.get(part) ?? [])].filter((mesh) => mesh.visible),
+      isBoss: this.target.isBoss,
+      height: this.target.height,
+      groundY: worldRoot.y,
+    });
   }
 }
 
