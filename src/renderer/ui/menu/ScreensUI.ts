@@ -3,7 +3,8 @@ import { CHARACTER_LIST, ACTIVE_SKILLS } from '../../data/characters/characters'
 import { audio } from '../../game/audio/AudioSystem';
 import { bus } from '../../game/core/EventBus';
 import { AppState, type AppStateName } from '../../game/core/StateManager';
-import { byId, clear, formatTime, make, show } from '../dom';
+import { CharacterPreview, PREVIEW_SIZE } from './CharacterPreview';
+import { byId, clear, formatTime, isVisible, make, show } from '../dom';
 
 /**
  * Every full-screen surface: main menu, character select, loading, pause,
@@ -78,6 +79,8 @@ export class ScreensUI {
 
   private chosen: CharacterId | null = null;
   private bound = false;
+  private previews = new CharacterPreview();
+  private canvases = new Map<CharacterId, HTMLCanvasElement>();
 
   constructor(
     private hosts: {
@@ -110,6 +113,8 @@ export class ScreensUI {
   }
 
   dispose(): void {
+    this.previews.dispose();
+    this.canvases.clear();
     bus.offOwner(this);
   }
 
@@ -117,6 +122,8 @@ export class ScreensUI {
     for (const node of [this.menu, this.select, this.loading, this.pause, this.settings, this.gameover, this.victory]) {
       if (node) show(node, false);
     }
+    // Nothing is visible, so nothing needs to be drawn.
+    this.previews.setActive(null);
   }
 
   showMenu(): void {
@@ -158,6 +165,16 @@ export class ScreensUI {
     for (const card of Array.from(this.selectGrid?.querySelectorAll('.char-card') ?? [])) {
       card.classList.remove('sel');
     }
+    this.showPreview(this.canvases.get(CHARACTER_LIST[0]?.id ?? 'vanguard') ?? null);
+  }
+
+  /** Per-frame hook: only the select screen ever draws, and only one card. */
+  render(): void {
+    if (this.select && isVisible(this.select)) this.previews.render();
+  }
+
+  private showPreview(canvas: HTMLCanvasElement | null): void {
+    this.previews.setActive(canvas);
   }
 
   showLoading(title: string): void {
@@ -241,6 +258,16 @@ export class ScreensUI {
       const ability = ACTIVE_SKILLS[definition.activeSkillId];
       const card = make('div', 'char-card');
       card.dataset.character = definition.id;
+
+      // Turntable preview of the actual operator body.
+      const canvas = document.createElement('canvas');
+      canvas.className = 'char-preview';
+      canvas.width = PREVIEW_SIZE;
+      canvas.height = PREVIEW_SIZE;
+      this.canvases.set(definition.id, canvas);
+      this.previews.addSlot(canvas, definition.id);
+      card.append(canvas);
+
       card.append(make('h3', undefined, definition.name.toUpperCase()));
       card.append(make('div', 'tag', definition.tagline));
 
@@ -279,6 +306,7 @@ export class ScreensUI {
         for (const other of Array.from(this.selectGrid?.querySelectorAll('.char-card') ?? [])) {
           other.classList.toggle('sel', other === card);
         }
+        this.showPreview(canvas);
         if (this.selectConfirm) this.selectConfirm.disabled = false;
       });
 

@@ -2,6 +2,7 @@ import { GameApp } from './app/GameApp';
 import * as THREE from 'three';
 import { buildGunModel, fitGunLength } from './game/weapons/WeaponModels';
 import { generateWeapon } from './game/weapons/WeaponGenerator';
+import { buildCharacterModel } from './game/player/CharacterModels';
 import { isDevelopment } from './game/core/SaveManager';
 
 /**
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
         buildGunModel,
         fitGunLength,
         generateWeapon,
+        buildCharacterModel,
       };
     }
     window.addEventListener('beforeunload', () => app.dispose());

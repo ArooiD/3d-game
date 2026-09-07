@@ -4,6 +4,7 @@ import { audio, shotSoundFor, SoundName } from '../audio/AudioSystem';
 import { bus, GameEvents } from '../core/EventBus';
 import type { CombatSystem } from '../combat/CombatSystem';
 import type { EffectsSystem } from '../effects/EffectsSystem';
+import { characterArmorColor, characterPalette } from '../player/CharacterModels';
 import type { PlayerController } from '../player/PlayerController';
 import type { PlayerState } from '../player/PlayerState';
 import { buildGunModel, fitGunLength, type GunModel } from './WeaponModels';
@@ -414,7 +415,12 @@ export class WeaponController {
     const weapon = this.current;
     if (!weapon) return;
 
-    const model = buildGunModel(weapon, { detail: 'high', hands: true });
+    const model = buildGunModel(weapon, {
+      detail: 'high',
+      hands: true,
+      armorColor: characterArmorColor(this.player.characterId),
+      armorAccent: characterPalette(this.player.characterId).accent,
+    });
     // Real guns are 0.3-1.2 m; the viewmodel keeps a compact, readable size.
     fitGunLength(model, weapon.weaponType === 'sniper_rifle' ? 0.86 : 0.62);
     this.viewModel.add(model.group);

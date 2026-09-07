@@ -19,6 +19,10 @@ export interface GunModelOptions {
   detail?: 'high' | 'low';
   /** Attach stylised gloved hands; viewmodel only. */
   hands?: boolean;
+  /** Archetype plate colour for the gloves and forearms, so the arms read as yours. */
+  armorColor?: number;
+  /** Archetype trim colour echoed on the forearm lamps. */
+  armorAccent?: number;
 }
 
 export interface GunModel {
@@ -42,6 +46,12 @@ const COLOR_DARK = 0x23272e;
 const COLOR_RAIL = 0x3d434c;
 const COLOR_GRIP = 0x2b241c;
 const COLOR_HAND = 0x6a4f3a;
+
+/** Lightens a hex colour toward white by `amount` (0..1). */
+function mixChannel(color: number, amount: number): number {
+  const mix = (channel: number) => Math.round(channel + (255 - channel) * amount);
+  return (mix((color >> 16) & 0xff) << 16) | (mix((color >> 8) & 0xff) << 8) | mix(color & 0xff);
+}
 
 /** Layout parameters that make each archetype read differently in the hand. */
 interface Layout {
@@ -410,18 +420,39 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
 
   // ------------------------------------------------------------------- hands
   if (options.hands) {
-    const skin = new THREE.MeshLambertMaterial({ color: COLOR_HAND, flatShading: true });
-    owned.push(skin);
+    const plate = options.armorColor ?? COLOR_HAND;
+    const glove = new THREE.MeshLambertMaterial({ color: mixChannel(plate, 0.4), flatShading: true });
+    const sleeve = new THREE.MeshLambertMaterial({ color: plate, flatShading: true });
+    owned.push(glove, sleeve);
+
+    // A forearm plate runs back off-screen from each glove so the viewmodel
+    // reads as the operator's own arms instead of a pair of floating hands.
+    const gauntlet = (hand: THREE.Group, side: number): void => {
+      place(hand, boxGeo, sleeve, 0.062, 0.05, 0.045, 0.004 * side, -0.048, 0.05).rotation.x = 0.5;
+      place(hand, boxGeo, glove, 0.074, 0.072, 0.22, 0.006 * side, -0.108, 0.15).rotation.x = 0.62;
+      if (options.armorAccent !== undefined) {
+        const lamp = new THREE.MeshLambertMaterial({
+          color: options.armorAccent,
+          emissive: options.armorAccent,
+          emissiveIntensity: 0.7,
+          flatShading: true,
+        });
+        owned.push(lamp);
+        place(hand, boxGeo, lamp, 0.02, 0.016, 0.1, 0.043 * side, -0.104, 0.16).rotation.x = 0.62;
+      }
+    };
+
     // Firing hand wraps the grip.
     const rightHand = new THREE.Group();
     rightHand.position.set(0.012, layout.receiverY - layout.receiver[1] * 0.5 - layout.gripLength * 0.5, gripZ + 0.012);
     rightHand.rotation.set(0.1, 0, -0.15);
     group.add(rightHand);
-    place(rightHand, boxGeo, skin, 0.055, 0.07, 0.075, 0, 0, 0);
+    place(rightHand, boxGeo, glove, 0.055, 0.07, 0.075, 0, 0, 0);
     for (let i = 0; i < 4; i++) {
-      place(rightHand, boxGeo, skin, 0.014, 0.05, 0.016, -0.03 + i * 0.016, 0.006, -0.038);
+      place(rightHand, boxGeo, glove, 0.014, 0.05, 0.016, -0.03 + i * 0.016, 0.006, -0.038);
     }
-    place(rightHand, boxGeo, skin, 0.05, 0.055, 0.05, 0.006, -0.05, 0.03).rotation.x = 0.5;
+    place(rightHand, boxGeo, glove, 0.05, 0.055, 0.05, 0.006, -0.05, 0.03).rotation.x = 0.5;
+    gauntlet(rightHand, 1);
 
     // Support hand: on the foregrip, pump or mag as the archetype dictates.
     const leftHand = new THREE.Group();
@@ -434,13 +465,11 @@ export function buildGunModel(weapon: Weapon, options: GunModelOptions = {}): Gu
     }
     leftHand.rotation.set(0.1, 0, 0.2);
     group.add(leftHand);
-    place(leftHand, boxGeo, skin, 0.052, 0.062, 0.07, 0, 0, 0);
+    place(leftHand, boxGeo, glove, 0.052, 0.062, 0.07, 0, 0, 0);
     for (let i = 0; i < 4; i++) {
-      place(leftHand, boxGeo, skin, 0.013, 0.046, 0.015, 0.026 - i * 0.016, 0.004, -0.034);
+      place(leftHand, boxGeo, glove, 0.013, 0.046, 0.015, 0.026 - i * 0.016, 0.004, -0.034);
     }
-    // Sleeve cuff hides the wrist seam.
-    place(leftHand, boxGeo, dark, 0.06, 0.05, 0.045, 0.004, -0.045, 0.045).rotation.x = 0.45;
-    place(rightHand, boxGeo, dark, 0.062, 0.05, 0.045, 0.004, -0.048, 0.05).rotation.x = 0.5;
+    gauntlet(leftHand, -1);
   }
 
   const muzzle = new THREE.Object3D();

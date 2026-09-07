@@ -722,6 +722,53 @@ async function run() {
       && muzzleReport.inHand > 0.3 && muzzleReport.inHand < 2,
       JSON.stringify(muzzleReport));
 
+    // ---- operator bodies: the same rig must produce a real, on-scale body ---
+    const bodyReport = await client.evaluate(`
+      const dbg = window.__gameDebug;
+      const Vec = dbg.THREE.Vector3;
+      const Box = dbg.THREE.Box3;
+      const rows = [];
+      for (const id of ['vanguard', 'ranger', 'engineer']) {
+        const built = dbg.buildCharacterModel(id);
+        built.skeleton.reset();
+        const probe = new (dbg.THREE.Group)();
+        probe.add(built.root);
+        probe.updateMatrixWorld(true);
+        let meshes = 0;
+        let bad = 0;
+        probe.traverse((child) => {
+          if (!child.isMesh) return;
+          meshes += 1;
+          const p = child.getWorldPosition(new Vec());
+          if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) bad += 1;
+        });
+        const box = new Box().setFromObject(probe);
+        rows.push({ id, meshes, bad, feet: box.min.y, top: box.max.y });
+        built.dispose();
+      }
+      const after = dbg.buildCharacterModel('vanguard');
+      const shell = new (dbg.THREE.Group)();
+      shell.add(after.root);
+      let beforeMeshes = 0;
+      shell.traverse((c) => { if (c.isMesh) beforeMeshes += 1; });
+      after.dispose();
+      let afterMeshes = 0;
+      shell.traverse((c) => { if (c.isMesh) afterMeshes += 1; });
+      return { rows, beforeMeshes, afterMeshes, detached: after.root.parent === null ? 1 : 0 };
+    `, cap(15000));
+    const bodyRows = bodyReport ? bodyReport.rows : [];
+    check('characters: every archetype builds a finite multi-part body',
+      bodyRows.length === 3 && bodyRows.every((row) => row.meshes >= 20 && row.bad === 0),
+      JSON.stringify(bodyRows.map((row) => row.id + ':' + row.meshes + (row.bad ? '/BAD' : ''))));
+    check('characters: bodies stand on the ground at player scale',
+      bodyRows.length === 3 && bodyRows.every((row) => Math.abs(row.feet) < 0.05
+        && row.top > 1.66 && row.top < 2.13),
+      JSON.stringify(bodyRows.map((row) => row.id + ':' + row.feet.toFixed(2) + '..' + row.top.toFixed(2))));
+    check('characters: dispose unparents every shell so closing the screen leaks nothing',
+      Boolean(bodyReport) && bodyReport.beforeMeshes >= 20 && bodyReport.afterMeshes === 0
+      && bodyReport.detached === 1,
+      bodyReport ? 'before ' + bodyReport.beforeMeshes + ' after ' + bodyReport.afterMeshes : 'n/a');
+
     const lootGunReport = await client.evaluate(`
       const g = window.__game;
       const dbg = window.__gameDebug;

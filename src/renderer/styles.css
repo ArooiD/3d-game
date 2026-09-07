@@ -712,6 +712,19 @@ body {
   box-shadow: 0 0 28px rgba(255, 156, 63, 0.22);
 }
 
+.char-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  margin: 0 0 12px;
+  background: radial-gradient(circle at 50% 32%, rgba(120, 150, 200, 0.16), rgba(6, 9, 14, 0.92) 72%);
+  border: 1px solid var(--line);
+}
+
+.char-card.sel .char-preview { border-color: var(--accent); }
+
+
 .char-card h3 {
   margin: 0;
   font-size: 21px;

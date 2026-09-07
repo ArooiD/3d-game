@@ -17,6 +17,7 @@ import { EnemyManager } from '../game/enemies/EnemyManager';
 import { EnemyFactory } from '../game/enemies/EnemyModels';
 import { LootSystem } from '../game/loot/LootSystem';
 import { disposeSharedWeaponGeometries } from '../game/weapons/WeaponModels';
+import { disposeSharedCharacterResources } from '../game/player/CharacterModels';
 import { CollisionWorld } from '../game/physics/CollisionWorld';
 import { CombatDrone, droneDamage } from '../game/player/CombatDrone';
 import { PlayerController } from '../game/player/PlayerController';
@@ -225,6 +226,7 @@ export class GameApp {
       // Menus still need the world to animate (and the camera to hold still).
       this.world.update(dt);
       this.effects.update(dt);
+      this.screens.render();
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -1272,6 +1274,7 @@ export class GameApp {
     EnemyFactory.disposeShared();
     disposeSharedLootGeometries();
     disposeSharedWeaponGeometries();
+    disposeSharedCharacterResources();
     this.renderer.dispose();
   }
 }

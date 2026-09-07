@@ -9,6 +9,10 @@ import { TargetGrid, rayCylinder } from '../src/renderer/game/enemies/TargetRegi
 import { Enemy } from '../src/renderer/game/enemies/Enemy';
 import { EnemyFactory } from '../src/renderer/game/enemies/EnemyModels';
 import { WorldBuilder } from '../src/renderer/game/world/WorldMeshes';
+import { buildCharacterModel } from '../src/renderer/game/player/CharacterModels';
+import type { BoneName } from '../src/renderer/game/anim/Rig';
+import { PLAYER_HEIGHT } from '../src/shared/constants';
+import type { CharacterId } from '../src/shared/types';
 import { enemyDefinition } from '../src/renderer/data/enemies/enemies';
 import type { EffectsSystem } from '../src/renderer/game/effects/EffectsSystem';
 const effects = { impactHit() {}, fleshHit() {}, explosion() {}, ring() {} } as unknown as EffectsSystem;
@@ -122,3 +126,44 @@ test('prop colliders match the visible mesh, not a bottom-anchored box', () => {
  const p=w2.moveCylinder(v(17,0,20),v(1.5,0,0),.4,1.8,.6);
  close(p.y,0.5); assert.ok(!p.hitWall,'a low ledge is a step, not a wall');
 });
+
+// The operator bodies share one skeleton implementation with the enemies, so a
+// regression here breaks both the character preview and any third-person shot of
+// the player. They must stand on the ground (feet at y = 0), reach roughly the
+// height of the collision capsule, and stay independent per instance.
+test('operator bodies stand on their feet and fit the player capsule', () => {
+  for (const id of ['vanguard', 'ranger', 'engineer'] as CharacterId[]) {
+    const built = buildCharacterModel(id);
+    built.skeleton.reset();
+    const box = new THREE.Box3().setFromObject(built.root);
+    assert.ok(Math.abs(box.min.y) < 0.02, `${id} feet float ${box.min.y} above the ground`);
+    // Headgear sticks up a little past the collision capsule, but a body built
+    // on the wrong scale (metres vs fractions) shows up immediately here.
+    assert.ok(box.max.y >= PLAYER_HEIGHT * 0.9, `${id} head at ${box.max.y} is below the eye line`);
+    assert.ok(box.max.y <= PLAYER_HEIGHT * 1.15, `${id} is ${box.max.y} tall, far over the ${PLAYER_HEIGHT} capsule`);
+    // Torso and head exist and are placed, otherwise the body renders as legs.
+    for (const bone of ['hips', 'chest', 'head'] as BoneName[]) {
+      assert.ok(built.skeleton.bones.get(bone), `${id} is missing the ${bone} bone`);
+    }
+    built.dispose();
+  }
+});
+
+// Previews build one body per card and throw them away on screen change; if a
+// mesh stayed parented, closing the select screen would leak geometry.
+test('operator bodies are independent instances and release their meshes', () => {
+  const a = buildCharacterModel('vanguard');
+  const b = buildCharacterModel('vanguard');
+  assert.notEqual(a.root, b.root);
+  assert.notEqual(a.skeleton, b.skeleton);
+  a.skeleton.bones.get('chest')!.rotation.x = 0.5;
+  assert.notEqual(b.skeleton.bones.get('chest')!.rotation.x, 0.5, 'rotating one body moved another');
+
+  assert.ok(a.meshes.length > 10, `only ${a.meshes.length} shells built for an operator`);
+  a.dispose();
+  assert.equal(a.meshes.length, 0);
+  // The other instance must survive its sibling being torn down.
+  assert.ok(b.meshes.length > 10);
+  b.dispose();
+});
+
