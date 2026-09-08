@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -54,7 +54,9 @@ await Promise.all([
 ]);
 
 cpSync(join(root, 'src/renderer/index.html'), join(dist, 'renderer/index.html'));
-cpSync(join(root, 'src/renderer/styles.css'), join(dist, 'renderer/styles.css'));
+for (const name of readdirSync(join(root, 'src/renderer'))) {
+  if (name.endsWith('.css')) cpSync(join(root, 'src/renderer', name), join(dist, 'renderer', name));
+}
 
 // The shipped index.html must reference the bundle instead of the TS source.
 const htmlPath = join(dist, 'renderer/index.html');

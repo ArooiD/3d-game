@@ -16,8 +16,11 @@
   font-family: 'Arial Narrow', 'Roboto Condensed', 'Segoe UI', sans-serif;
 }
 
+/* .vitals is deliberately left out: a filter on it would turn it into the
+   containing block for its position:fixed children (.vitals-head, .bar-xp),
+   pinning the name/level readout and the XP strip to the panel instead of the
+   viewport. */
 #hud .hud-objective,
-#hud .vitals,
 #hud .weapon-panel,
 #hud .abilities,
 #hud .boss-bar,

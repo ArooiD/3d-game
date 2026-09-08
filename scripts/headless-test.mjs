@@ -467,6 +467,48 @@ async function run() {
     `, cap(6000));
     check('hud: weapon name is populated', String(hudText.name).length > 0, `weapon="${hudText.name}" (${hudText.type}) ammo=${hudText.mag}`);
 
+    // The comic HUD skin is a second stylesheet; if the build ever stops copying
+    // it the HUD silently falls back to the legacy layout, and a filter on
+    // .vitals turns it into the containing block for its position:fixed children
+    // (.vitals-head, .bar-xp), unpinning the bottom-centre group. Both regress
+    // with no console error, so assert on the real layout.
+    const hudLayout = await client.evaluate(`
+      const rect = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const sheets = Array.from(document.styleSheets).map((s) => (s.href || '').split('/').pop());
+      const head = rect('#hud .vitals-head');
+      const xp = rect('#hud .bar-xp');
+      return {
+        sheets,
+        vitalsFilter: getComputedStyle(document.querySelector('#hud .vitals')).filter,
+        headCentered: Math.abs(head.left + head.width / 2 - innerWidth / 2) < 2,
+        xpCentered: Math.abs(xp.left + xp.width / 2 - innerWidth / 2) < 2,
+        xpWidth: Math.round(xp.width),
+        objectiveRight: Math.round(rect('#hud-objective').right),
+        objectiveTop: Math.round(rect('#hud-objective').top),
+        vw: innerWidth,
+      };
+    `);
+    check(
+      'hud: comic skin stylesheet is loaded from the bundle',
+      hudLayout.sheets.includes('hud-comic-shooter.css'),
+      `stylesheets=${hudLayout.sheets.join(', ')}`,
+    );
+    check(
+      'hud: objective tracker uses the top-right comic layout',
+      hudLayout.objectiveRight > hudLayout.vw * 0.75 && hudLayout.objectiveTop > 120,
+      `right=${hudLayout.objectiveRight} top=${hudLayout.objectiveTop} vw=${hudLayout.vw}`,
+    );
+    check(
+      'hud: vitals panel creates no filter containing block',
+      hudLayout.vitalsFilter === 'none',
+      `filter=${hudLayout.vitalsFilter}`,
+    );
+    check(
+      'hud: name/level and XP strip stay pinned to the bottom-centre of the viewport',
+      hudLayout.headCentered && hudLayout.xpCentered && hudLayout.xpWidth > 100,
+      `headCentered=${hudLayout.headCentered} xpCentered=${hudLayout.xpCentered} xpWidth=${hudLayout.xpWidth}`,
+    );
+
     // ---- transitions + engine liveness ----------------------------------
     const trace = (await client.evaluate(TRACE_SIGS)).slice(Math.max(0, traceMark - 1));
     const end = await client.evaluate(INSTALL_TRACE);
